@@ -2,6 +2,8 @@
 
 A small MCP (Model Context Protocol) firewall that proxies JSON-RPC and enforces allow/deny policies for tools, resources, prompts, and methods. It can run as a stdio wrapper or as a streamable HTTP reverse proxy, and includes a clean local GUI for policy edits, history, templates, and live logs.
 
+Important: policy controls intent, containment controls capability. If you allow a CLI tool, that tool can still reach external data unless you enable containment (`--no-network` + `--allow-bin`).
+
 ## Quick start (stdio)
 
 Build:
@@ -25,7 +27,23 @@ Serve the GUI while running stdio:
 ```
 
 Open `http://127.0.0.1:8081/ui`.
-The policy editor shows diff counts, local warnings, a library modal with diff view, and history in the Advanced drawer. The dashboard includes a \"Top blocked by\" chart, log table filters, CSV exports, and filter presets.
+The policy editor shows diff counts, local warnings, a library modal with diff view, and history in the Advanced drawer. The dashboard includes a \"Top blocked by\" chart, log table filters, CSV exports, filter presets, and a replay/simulate control for blocked events.
+
+## Modes (mental model)
+
+- Observe mode: log + flag only (no blocking).
+- Enforce mode: block policy violations.
+- Contain mode: enforce + network sandbox + allowlisted binaries.
+
+```sh
+./mcp-firewall --mode observe --policy policy.example.yaml -- <server-command>
+./mcp-firewall --mode enforce --policy policy.example.yaml -- <server-command>
+./mcp-firewall --mode contain --policy policy.example.yaml --no-network --allow-bin git -- <server-command>
+```
+
+Notes:
+- `--mode observe` is shorthand for `--dry-run`.
+- `--mode contain` enables `--no-network` automatically, but you should still set `--allow-bin` to constrain subprocesses.
 
 Enable policy edits from the GUI:
 
@@ -65,7 +83,20 @@ Wrap discovered stdio servers (and proxy HTTP servers) with the firewall:
   --host-http-path /mcp
 ```
 
-The installer writes a routes file (default `~/.mcp-firewall/routes.json`) for HTTP upstreams and flips on a global toggle file (default `~/.mcp-firewall/enabled`).
+The installer writes timestamped backups next to each config file, plus a routes file (default `~/.mcp-firewall/routes.json`) for HTTP upstreams, and flips on a global toggle file (default `~/.mcp-firewall/enabled`).
+
+Preview changes with diffs only:
+
+```sh
+./mcp-firewall --host-install --host-dry-run --policy policy.example.yaml --host-root .
+```
+
+Uninstall (unwrap in place), or restore from the latest backups:
+
+```sh
+./mcp-firewall --host-uninstall --host-root .
+./mcp-firewall --host-uninstall --host-restore --host-root .
+```
 
 Run the HTTP proxy for those routes:
 
@@ -166,9 +197,21 @@ Enable inspection to flag suspicious outputs from tools/resources/prompts:
 ./mcp-firewall --inspect --inspect-threshold 5 --inspect-excerpt --policy policy.example.yaml -- <server-command>
 ```
 
+Per-source thresholds (useful when tool output is noisy):
+
+```sh
+./mcp-firewall --inspect \
+  --inspect-threshold-tools 7 \
+  --inspect-threshold-resources 5 \
+  --inspect-threshold-prompts 3 \
+  --policy policy.example.yaml -- <server-command>
+```
+
 Optional hardening:
 - `--inspect-redact` replaces suspicious text with `[redacted by mcp-firewall]`.
 - `--inspect-block` blocks responses that cross the threshold.
+
+Inspection is a lint layer by default: it logs `decision=flagged` events and does not block unless you enable it.
 
 ## Policy model
 
@@ -182,7 +225,7 @@ Rules are applied in this order:
 2. Allow list (if non-empty)
 3. Otherwise allowed
 
-Patterns use glob matching (`*`, `?`).
+If an allow list is empty and `strict=false`, that section defaults to allow. Patterns use glob matching (`*`, `?`) and are case-sensitive by default unless `case_insensitive=true`. Set `methods.strict=true` to default-deny unknown/unspecified methods. For resources, `normalize=true` canonicalizes schemes/hosts, decodes `%XX`, and cleans paths before matching.
 
 ## Framing (stdio)
 
@@ -190,11 +233,12 @@ MCP stdio uses line-delimited JSON in the current spec. This proxy defaults to `
 
 ## Logging
 
-Blocked traffic is logged as JSON lines to stderr by default. Use `--log` to write to a file and `--log-allowed` to log allowed events too. Suspicious outputs create `decision=flagged` log entries with `suspicionScore` and `suspicionFlags` fields. The GUI reads logs via SSE from `/api/logs/stream` and renders a table with filters.
+Blocked traffic is logged as JSON lines to stderr by default. Use `--log` to write to a file and `--log-allowed` to log allowed events too. Suspicious outputs create `decision=flagged` log entries with `suspicionScore` and `suspicionFlags` fields. Each event includes stable `requestId`/`traceId`, `direction`, normalized targets, and the matched `policyRule`/`policyPattern` to make downstream analysis easier. The GUI reads logs via SSE from `/api/logs/stream` and renders a table with filters.
 
 ## Limitations
 
 - Allowing a CLI tool still allows the model to fetch external data through that tool.
+- Only MCP traffic routed through the wrapper or HTTP proxy is intercepted (direct stdio/HTTP connections bypass).
 - HTTP mode is a reverse proxy for streamable HTTP servers (no legacy SSE transport adapter).
 - Prompt-injection detection is heuristic and can produce false positives or negatives.
 

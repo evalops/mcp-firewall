@@ -403,12 +403,50 @@ textarea {
   border-bottom: 1px solid rgba(29, 27, 22, 0.06);
 }
 
+.log-table tbody tr {
+  transition: background 0.2s ease;
+  cursor: pointer;
+}
+
+.log-table tbody tr:hover td {
+  background: rgba(195, 132, 24, 0.08);
+}
+
+.log-table tbody tr.selected td {
+  background: rgba(195, 132, 24, 0.16);
+}
+
 .log-table th {
   background: rgba(29, 27, 22, 0.04);
   font-size: 0.75rem;
   text-transform: uppercase;
   letter-spacing: 0.08em;
   color: var(--muted);
+}
+
+.log-replay {
+  margin-top: 14px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 14px;
+  border-radius: 12px;
+  border: 1px dashed rgba(29, 27, 22, 0.15);
+  background: rgba(29, 27, 22, 0.03);
+}
+
+.replay-meta {
+  display: grid;
+  gap: 4px;
+}
+
+.replay-actions {
+  display: grid;
+  gap: 6px;
+  justify-items: end;
+  text-align: right;
 }
 
 .modal {

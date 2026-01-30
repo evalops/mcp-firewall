@@ -72,7 +72,7 @@
               <p class="value" id="upstream">-</p>
             </div>
             <div>
-              <p class="label">Dry run</p>
+              <p class="label">Enforcement</p>
               <p class="value" id="dry-run">-</p>
             </div>
             <div>
@@ -152,6 +152,16 @@
               </thead>
               <tbody id="log-table-body"></tbody>
             </table>
+          </div>
+          <div class="log-replay">
+            <div class="replay-meta">
+              <p class="label">Selected</p>
+              <p class="value" id="replay-selection">None</p>
+            </div>
+            <div class="replay-actions">
+              <button id="simulate-log" class="primary" disabled>Simulate with draft</button>
+              <p class="hint" id="simulate-result"></p>
+            </div>
           </div>
         </section>
       </div>

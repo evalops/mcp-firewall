@@ -148,14 +148,22 @@ func (p *HTTPProxy) handlePOST(w http.ResponseWriter, r *http.Request) {
 				decision = "blocked"
 			}
 		}
+		requestID, traceID, rpcID := p.core.newRequestIDs(msg.ID)
+		detail.requestID = requestID
+		detail.traceID = traceID
 		p.core.logger.Log(LogEvent{
-			Direction: "client->server",
-			Decision:  decision,
-			Reason:    reason,
-			Method:    msg.Method,
-			ID:        normalizeID(msg.ID),
-			Name:      detail.name,
-			URI:       detail.uri,
+			Direction:     "client->server",
+			Decision:      decision,
+			Reason:        reason,
+			Method:        msg.Method,
+			ID:            rpcID,
+			RequestID:     requestID,
+			TraceID:       traceID,
+			Name:          detail.name,
+			URI:           detail.uri,
+			Normalized:    detail.normalized,
+			PolicyRule:    detail.rule,
+			PolicyPattern: detail.pattern,
 		})
 		if !allowed && !p.core.dryRun {
 			if hasID(msg.ID) {
@@ -196,18 +204,36 @@ func (p *HTTPProxy) handlePOST(w http.ResponseWriter, r *http.Request) {
 		if err := json.Unmarshal(respBody, &respMsg); err == nil {
 			outcome, err := p.core.processResponse(detail, &respMsg)
 			if err == nil {
-				if p.core.inspect.enabled() && outcome.inspection.Score >= p.core.inspect.Threshold {
+				if outcome.threshold > 0 && outcome.inspection.Score >= outcome.threshold {
+					reqID := normalizeID(respMsg.ID)
+					requestID := detail.requestID
+					traceID := detail.traceID
+					if requestID == "" {
+						requestID = reqID
+					}
+					if traceID == "" {
+						if reqID != "" {
+							traceID = reqID
+						} else {
+							traceID = requestID
+						}
+					}
 					p.core.logger.Log(LogEvent{
-						Direction: "server->client",
-						Decision:  "flagged",
-						Reason:    outcome.reason,
-						Method:    detail.method,
-						ID:        normalizeID(respMsg.ID),
-						Name:      detail.name,
-						URI:       detail.uri,
-						Score:     outcome.inspection.Score,
-						Flags:     outcome.inspection.Flags,
-						Excerpt:   outcome.inspection.Excerpt,
+						Direction:     "server->client",
+						Decision:      "flagged",
+						Reason:        outcome.reason,
+						Method:        detail.method,
+						ID:            reqID,
+						RequestID:     requestID,
+						TraceID:       traceID,
+						Name:          detail.name,
+						URI:           detail.uri,
+						Normalized:    detail.normalized,
+						PolicyRule:    detail.rule,
+						PolicyPattern: detail.pattern,
+						Score:         outcome.inspection.Score,
+						Flags:         outcome.inspection.Flags,
+						Excerpt:       outcome.inspection.Excerpt,
 					})
 				}
 				if outcome.blocked && !p.core.dryRun {
@@ -364,7 +390,7 @@ func (p *HTTPProxy) pipeSSE(w http.ResponseWriter, body io.Reader, pending pendi
 						goto writeEvent
 					}
 					policy := p.core.currentPolicy()
-					allowed, reason := policy.Methods.Allowed(msg.Method)
+					allowed, reason, match := policy.Methods.AllowedMatch(msg.Method)
 					decision := "allowed"
 					if !allowed {
 						if p.core.dryRun {
@@ -373,12 +399,21 @@ func (p *HTTPProxy) pipeSSE(w http.ResponseWriter, body io.Reader, pending pendi
 							decision = "blocked"
 						}
 					}
+					requestID, traceID, rpcID := p.core.newRequestIDs(msg.ID)
+					methodRule := "methods"
+					if match.Rule != "" {
+						methodRule = "methods." + match.Rule
+					}
 					p.core.logger.Log(LogEvent{
-						Direction: "server->client",
-						Decision:  decision,
-						Reason:    reason,
-						Method:    msg.Method,
-						ID:        normalizeID(msg.ID),
+						Direction:     "server->client",
+						Decision:      decision,
+						Reason:        reason,
+						Method:        msg.Method,
+						ID:            rpcID,
+						RequestID:     requestID,
+						TraceID:       traceID,
+						PolicyRule:    methodRule,
+						PolicyPattern: match.Pattern,
 					})
 					if !allowed && !p.core.dryRun {
 						continue
@@ -390,18 +425,36 @@ func (p *HTTPProxy) pipeSSE(w http.ResponseWriter, body io.Reader, pending pendi
 					}
 					outcome, err := p.core.processResponse(pending, &msg)
 					if err == nil {
-						if p.core.inspect.enabled() && outcome.inspection.Score >= p.core.inspect.Threshold {
+						if outcome.threshold > 0 && outcome.inspection.Score >= outcome.threshold {
+							reqID := normalizeID(msg.ID)
+							requestID := pending.requestID
+							traceID := pending.traceID
+							if requestID == "" {
+								requestID = reqID
+							}
+							if traceID == "" {
+								if reqID != "" {
+									traceID = reqID
+								} else {
+									traceID = requestID
+								}
+							}
 							p.core.logger.Log(LogEvent{
-								Direction: "server->client",
-								Decision:  "flagged",
-								Reason:    outcome.reason,
-								Method:    pending.method,
-								ID:        normalizeID(msg.ID),
-								Name:      pending.name,
-								URI:       pending.uri,
-								Score:     outcome.inspection.Score,
-								Flags:     outcome.inspection.Flags,
-								Excerpt:   outcome.inspection.Excerpt,
+								Direction:     "server->client",
+								Decision:      "flagged",
+								Reason:        outcome.reason,
+								Method:        pending.method,
+								ID:            reqID,
+								RequestID:     requestID,
+								TraceID:       traceID,
+								Name:          pending.name,
+								URI:           pending.uri,
+								Normalized:    pending.normalized,
+								PolicyRule:    pending.rule,
+								PolicyPattern: pending.pattern,
+								Score:         outcome.inspection.Score,
+								Flags:         outcome.inspection.Flags,
+								Excerpt:       outcome.inspection.Excerpt,
 							})
 						}
 						if outcome.blocked && !p.core.dryRun {

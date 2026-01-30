@@ -4,6 +4,8 @@
 methods:
   allow: []
   deny: []
+  strict: false
+  case_insensitive: false
 
 tools:
   allow:
@@ -13,6 +15,8 @@ tools:
     - "email.*"
     - "web.*"
     - "github.*"
+  strict: false
+  case_insensitive: false
 
 resources:
   allow_schemes:
@@ -24,7 +28,20 @@ resources:
     - "smtp"
     - "imap"
     - "s3"
+  strict: false
+  case_insensitive: false
+  normalize: true
 
 prompts:
   allow: []
   deny: []
+  strict: false
+  case_insensitive: false
+
+metadata:
+  tools: 0
+  resources: 0
+  prompts: 0
+  schemes: []
+  generated_at: ""
+  note: "Allow lists empty => default allow unless strict=true. Patterns are case-sensitive unless case_insensitive=true."

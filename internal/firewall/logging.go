@@ -14,20 +14,27 @@ type Logger struct {
 	buffer     []LogEvent
 	maxBuffer  int
 	subs       map[chan LogEvent]struct{}
+	seq        uint64
 }
 
 type LogEvent struct {
-	TS        string   `json:"ts"`
-	Direction string   `json:"direction"`
-	Decision  string   `json:"decision"`
-	Reason    string   `json:"reason,omitempty"`
-	Method    string   `json:"method,omitempty"`
-	ID        string   `json:"id,omitempty"`
-	Name      string   `json:"name,omitempty"`
-	URI       string   `json:"uri,omitempty"`
-	Score     int      `json:"suspicionScore,omitempty"`
-	Flags     []string `json:"suspicionFlags,omitempty"`
-	Excerpt   string   `json:"suspicionExcerpt,omitempty"`
+	Seq           uint64   `json:"seq,omitempty"`
+	TS            string   `json:"ts"`
+	Direction     string   `json:"direction"`
+	Decision      string   `json:"decision"`
+	Reason        string   `json:"reason,omitempty"`
+	Method        string   `json:"method,omitempty"`
+	ID            string   `json:"id,omitempty"`
+	RequestID     string   `json:"requestId,omitempty"`
+	TraceID       string   `json:"traceId,omitempty"`
+	Name          string   `json:"name,omitempty"`
+	URI           string   `json:"uri,omitempty"`
+	Normalized    string   `json:"normalized,omitempty"`
+	PolicyRule    string   `json:"policyRule,omitempty"`
+	PolicyPattern string   `json:"policyPattern,omitempty"`
+	Score         int      `json:"suspicionScore,omitempty"`
+	Flags         []string `json:"suspicionFlags,omitempty"`
+	Excerpt       string   `json:"suspicionExcerpt,omitempty"`
 }
 
 type LoggerOptions struct {
@@ -64,6 +71,10 @@ func (l *Logger) Log(event LogEvent) {
 		event.TS = time.Now().UTC().Format(time.RFC3339Nano)
 	}
 	l.mu.Lock()
+	l.seq++
+	if event.Seq == 0 {
+		event.Seq = l.seq
+	}
 	enc := json.NewEncoder(l.w)
 	_ = enc.Encode(event)
 	if l.maxBuffer > 0 {

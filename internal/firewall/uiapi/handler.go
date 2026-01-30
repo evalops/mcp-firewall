@@ -18,22 +18,26 @@ var (
 )
 
 type Status struct {
-	Ready              bool     `json:"ready"`
-	Mode               string   `json:"mode"`
-	Upstream           string   `json:"upstream"`
-	DryRun             bool     `json:"dryRun"`
-	InspectEnabled     bool     `json:"inspectEnabled"`
-	InspectThreshold   int      `json:"inspectThreshold"`
-	Tools              int      `json:"tools"`
-	Resources          int      `json:"resources"`
-	Prompts            int      `json:"prompts"`
-	PolicyWritable     bool     `json:"policyWritable"`
-	PolicyVersion      string   `json:"policyVersion"`
-	NoNetwork          bool     `json:"noNetwork"`
-	SandboxBestEffort  bool     `json:"sandboxBestEffort"`
-	AllowedBins        []string `json:"allowedBins,omitempty"`
-	EnforcementEnabled bool     `json:"enforcementEnabled"`
-	ToggleFile         string   `json:"toggleFile,omitempty"`
+	Ready                    bool     `json:"ready"`
+	Mode                     string   `json:"mode"`
+	Upstream                 string   `json:"upstream"`
+	EnforcementMode          string   `json:"enforcementMode"`
+	DryRun                   bool     `json:"dryRun"`
+	InspectEnabled           bool     `json:"inspectEnabled"`
+	InspectThreshold         int      `json:"inspectThreshold"`
+	InspectToolThreshold     int      `json:"inspectToolThreshold"`
+	InspectResourceThreshold int      `json:"inspectResourceThreshold"`
+	InspectPromptThreshold   int      `json:"inspectPromptThreshold"`
+	Tools                    int      `json:"tools"`
+	Resources                int      `json:"resources"`
+	Prompts                  int      `json:"prompts"`
+	PolicyWritable           bool     `json:"policyWritable"`
+	PolicyVersion            string   `json:"policyVersion"`
+	NoNetwork                bool     `json:"noNetwork"`
+	SandboxBestEffort        bool     `json:"sandboxBestEffort"`
+	AllowedBins              []string `json:"allowedBins,omitempty"`
+	EnforcementEnabled       bool     `json:"enforcementEnabled"`
+	ToggleFile               string   `json:"toggleFile,omitempty"`
 }
 
 type HistoryEntry struct {
@@ -57,6 +61,28 @@ type Help struct {
 	Notes  []string `json:"notes"`
 }
 
+type SimulateEvent struct {
+	Method string `json:"method"`
+	Name   string `json:"name,omitempty"`
+	URI    string `json:"uri,omitempty"`
+}
+
+type SimulateRequest struct {
+	Policy string        `json:"policy"`
+	Event  SimulateEvent `json:"event"`
+}
+
+type SimulateResult struct {
+	Decision      string `json:"decision"`
+	Reason        string `json:"reason,omitempty"`
+	Method        string `json:"method,omitempty"`
+	Name          string `json:"name,omitempty"`
+	URI           string `json:"uri,omitempty"`
+	Normalized    string `json:"normalized,omitempty"`
+	PolicyRule    string `json:"policyRule,omitempty"`
+	PolicyPattern string `json:"policyPattern,omitempty"`
+}
+
 type Backend interface {
 	Status() Status
 	PolicyGet() (string, error)
@@ -70,6 +96,7 @@ type Backend interface {
 	SubscribeLogs(buffer int) (<-chan json.RawMessage, func())
 	ToggleGet() (bool, string)
 	ToggleSet(enabled bool) error
+	Simulate(policyYAML string, event SimulateEvent) (SimulateResult, error)
 }
 
 type Config struct {
@@ -116,6 +143,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.handlePolicyHistory(w, r)
 	case r.URL.Path == "/api/toggle":
 		h.handleToggle(w, r)
+	case r.URL.Path == "/api/simulate":
+		h.handleSimulate(w, r)
 	case r.URL.Path == "/api/logs/stream":
 		h.handleLogsStream(w, r)
 	default:
@@ -332,6 +361,43 @@ func (h *Handler) handleLogsStream(w http.ResponseWriter, r *http.Request) {
 			flusher.Flush()
 		}
 	}
+}
+
+func (h *Handler) handleSimulate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", "POST")
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	body, err := readLimited(r.Body, h.maxBody)
+	if err != nil {
+		http.Error(w, "request too large", http.StatusRequestEntityTooLarge)
+		return
+	}
+	var payload SimulateRequest
+	if err := json.Unmarshal(body, &payload); err != nil {
+		http.Error(w, "invalid request", http.StatusBadRequest)
+		return
+	}
+	if payload.Policy == "" {
+		http.Error(w, "missing policy", http.StatusBadRequest)
+		return
+	}
+	if payload.Event.Method == "" {
+		http.Error(w, "missing event method", http.StatusBadRequest)
+		return
+	}
+	result, err := h.backend.Simulate(payload.Policy, payload.Event)
+	if err != nil {
+		switch {
+		case errors.Is(err, ErrInvalidPolicy):
+			http.Error(w, err.Error(), http.StatusBadRequest)
+		default:
+			http.Error(w, "simulation failed", http.StatusInternalServerError)
+		}
+		return
+	}
+	writeJSON(w, result)
 }
 
 func (h *Handler) authorize(r *http.Request) bool {

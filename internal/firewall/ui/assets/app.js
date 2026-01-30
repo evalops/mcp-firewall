@@ -42,6 +42,9 @@ const exportChartBtn = document.getElementById("export-chart");
 const savePolicyBtn = document.getElementById("save-policy");
 const reloadPolicyBtn = document.getElementById("reload-policy");
 const clearLogsBtn = document.getElementById("clear-logs");
+const replaySelection = document.getElementById("replay-selection");
+const simulateBtn = document.getElementById("simulate-log");
+const simulateResult = document.getElementById("simulate-result");
 
 const MAX_LOGS = 500;
 const PRESET_KEY = "mcpFirewallLogPresets";
@@ -58,6 +61,8 @@ let presets = loadPresets();
 let streamRetryMs = 1000;
 let streamRetryTimer = null;
 let enforcementEnabled = true;
+let selectedLog = null;
+let selectedKey = "";
 
 function setStatusPill(text) {
   if (statusPill.textContent === "Auth required") {
@@ -107,8 +112,28 @@ async function loadStatus() {
   const data = await res.json();
   setStatusPill(data.ready ? "Online" : "Starting");
   upstreamEl.textContent = data.upstream || "-";
-  dryRunEl.textContent = data.dryRun ? "Enabled" : "Disabled";
-  inspectEl.textContent = data.inspectEnabled ? `On (>= ${data.inspectThreshold})` : "Off";
+  const enforcementMode = (data.enforcementMode || (data.dryRun ? "observe" : "enforce")).toLowerCase();
+  const enforcementLabel = enforcementMode ? enforcementMode[0].toUpperCase() + enforcementMode.slice(1) : "Enforce";
+  dryRunEl.textContent = enforcementLabel;
+  const baseThreshold = data.inspectThreshold || 0;
+  const toolThreshold = data.inspectToolThreshold || baseThreshold;
+  const resourceThreshold = data.inspectResourceThreshold || baseThreshold;
+  const promptThreshold = data.inspectPromptThreshold || baseThreshold;
+  const hasOverrides =
+    (data.inspectToolThreshold || 0) > 0 ||
+    (data.inspectResourceThreshold || 0) > 0 ||
+    (data.inspectPromptThreshold || 0) > 0;
+  if (!data.inspectEnabled) {
+    inspectEl.textContent = "Off";
+  } else if (!hasOverrides && toolThreshold === resourceThreshold && toolThreshold === promptThreshold) {
+    inspectEl.textContent = `On (>= ${toolThreshold})`;
+  } else {
+    const parts = [];
+    if (toolThreshold) parts.push(`tools>=${toolThreshold}`);
+    if (resourceThreshold) parts.push(`resources>=${resourceThreshold}`);
+    if (promptThreshold) parts.push(`prompts>=${promptThreshold}`);
+    inspectEl.textContent = `On (${parts.join(", ")})`;
+  }
   policyTotalsEl.textContent = `${data.tools} tools - ${data.resources} resources - ${data.prompts} prompts`;
   modeEl.textContent = data.mode || "stdio";
   const noNetwork = !!data.noNetwork;
@@ -165,6 +190,36 @@ async function loadPolicy() {
   renderDiffIfOpen();
 }
 
+function logKey(log) {
+  return log.requestId || log.traceId || log.id || log.ts || "";
+}
+
+function setSelectedLog(log) {
+  selectedLog = log;
+  selectedKey = log ? logKey(log) : "";
+  updateReplayPanel();
+  if (simulateResult) {
+    simulateResult.textContent = "";
+  }
+}
+
+function updateReplayPanel() {
+  if (!replaySelection || !simulateBtn || !simulateResult) {
+    return;
+  }
+  if (!selectedLog) {
+    replaySelection.textContent = "None";
+    simulateBtn.disabled = true;
+    simulateResult.textContent = "";
+    return;
+  }
+  const decision = selectedLog.decision || "event";
+  const method = selectedLog.method || "(unknown)";
+  const target = selectedLog.name || selectedLog.uri || "(none)";
+  replaySelection.textContent = `${decision} · ${method} · ${target}`;
+  simulateBtn.disabled = false;
+}
+
 function renderLogTable() {
   logTableBody.innerHTML = "";
   const filtered = filterLogs(logs);
@@ -179,6 +234,14 @@ function renderLogTable() {
   }
   filtered.slice().reverse().forEach((log) => {
     const row = document.createElement("tr");
+    const key = logKey(log);
+    if (key && key === selectedKey) {
+      row.classList.add("selected");
+    }
+    row.addEventListener("click", () => {
+      setSelectedLog(log);
+      renderLogTable();
+    });
     const decision = document.createElement("td");
     decision.textContent = log.decision || "";
     const method = document.createElement("td");
@@ -224,6 +287,9 @@ function appendLog(event) {
   if (logs.length > MAX_LOGS) {
     logs = logs.slice(logs.length - MAX_LOGS);
   }
+  if (selectedKey && !logs.some((log) => logKey(log) === selectedKey)) {
+    setSelectedLog(null);
+  }
   renderLogTable();
   renderChart();
 }
@@ -238,6 +304,7 @@ function connectLogStream(reset = true) {
   }
   if (reset) {
     logs = [];
+    setSelectedLog(null);
     renderLogTable();
     renderChart();
   }
@@ -381,9 +448,12 @@ function computeWarnings(text) {
   const lines = text.split(/\r?\n/);
   let section = "";
   let subsection = "";
-  let hasAnyRule = false;
-  let hasToolsRules = false;
-  let hasResourceRules = false;
+  const stats = {
+    methods: { allow: 0, deny: 0, strict: false, caseInsensitive: false, hasUpper: false },
+    tools: { allow: 0, deny: 0, strict: false, caseInsensitive: false, hasUpper: false },
+    resources: { allow: 0, deny: 0, strict: false, normalize: false, caseInsensitive: false, hasUpper: false },
+    prompts: { allow: 0, deny: 0, strict: false, caseInsensitive: false, hasUpper: false },
+  };
   const allowSchemes = [];
   const allowWildcards = [];
 
@@ -399,21 +469,41 @@ function computeWarnings(text) {
       subsection = "";
       return;
     }
+    if (trimmed.startsWith("strict:")) {
+      const value = trimmed.split(":")[1].trim().toLowerCase();
+      if (stats[section]) {
+        stats[section].strict = value === "true";
+      }
+      return;
+    }
+    if (trimmed.startsWith("case_insensitive:")) {
+      const value = trimmed.split(":")[1].trim().toLowerCase();
+      if (stats[section]) {
+        stats[section].caseInsensitive = value === "true";
+      }
+      return;
+    }
+    if (trimmed.startsWith("normalize:")) {
+      const value = trimmed.split(":")[1].trim().toLowerCase();
+      if (section === "resources") {
+        stats.resources.normalize = value === "true";
+      }
+      return;
+    }
     if (indent > 0 && trimmed.endsWith(":")) {
       subsection = trimmed.slice(0, -1);
       return;
     }
     if (trimmed.startsWith("-")) {
       const value = trimmed.slice(1).trim().replace(/^"|"$/g, "");
-      hasAnyRule = true;
-      if (section === "tools" && (subsection === "allow" || subsection === "deny")) {
-        hasToolsRules = true;
-      }
-      if (section === "resources") {
-        hasResourceRules = true;
-        if (subsection === "allow_schemes") {
-          allowSchemes.push(value.toLowerCase());
+      if (stats[section] && (subsection === "allow" || subsection === "deny")) {
+        stats[section][subsection] += 1;
+        if (value !== value.toLowerCase()) {
+          stats[section].hasUpper = true;
         }
+      }
+      if (section === "resources" && subsection === "allow_schemes") {
+        allowSchemes.push(value.toLowerCase());
       }
       if (subsection === "allow" && (value.includes("*") || value.includes("?"))) {
         allowWildcards.push(section || "unknown");
@@ -422,15 +512,25 @@ function computeWarnings(text) {
   });
 
   const warnings = [];
-  if (!hasAnyRule) {
-    warnings.push("Policy has no allow/deny rules; everything is permitted.");
-  }
-  if (!hasToolsRules) {
-    warnings.push("Tools rules are empty; all tools are allowed.");
-  }
-  if (!hasResourceRules) {
-    warnings.push("Resources rules are empty; all resources are allowed.");
-  }
+  ["methods", "tools", "resources", "prompts"].forEach((key) => {
+    const stat = stats[key];
+    if (!stat) {
+      return;
+    }
+    if (stat.allow === 0 && stat.deny === 0 && !stat.strict) {
+      if (key === "methods") {
+        warnings.push("methods allow list empty => unknown methods allowed (strict=false)");
+      } else {
+        warnings.push(`${key} allow list empty => default allow`);
+      }
+    }
+    if (stat.allow === 0 && stat.strict) {
+      warnings.push(`${key} strict=true with empty allow => default deny`);
+    }
+    if (stat.hasUpper && !stat.caseInsensitive) {
+      warnings.push(`${key} patterns include uppercase but case_insensitive=false`);
+    }
+  });
   if (allowSchemes.includes("http") || allowSchemes.includes("https")) {
     warnings.push("Resource allow_schemes includes http/https (external content).");
   }
@@ -878,6 +978,7 @@ function exportLogs() {
   const filtered = filterLogs(logs);
   const rows = [
     [
+      "seq",
       "ts",
       "decision",
       "method",
@@ -886,6 +987,11 @@ function exportLogs() {
       "reason",
       "direction",
       "id",
+      "requestId",
+      "traceId",
+      "policyRule",
+      "policyPattern",
+      "normalized",
       "suspicionScore",
       "suspicionFlags",
       "suspicionExcerpt",
@@ -893,6 +999,7 @@ function exportLogs() {
   ];
   filtered.forEach((log) => {
     rows.push([
+      log.seq || "",
       log.ts || "",
       log.decision || "",
       log.method || "",
@@ -901,6 +1008,11 @@ function exportLogs() {
       log.reason || "",
       log.direction || "",
       log.id || "",
+      log.requestId || "",
+      log.traceId || "",
+      log.policyRule || "",
+      log.policyPattern || "",
+      log.normalized || "",
       log.suspicionScore || "",
       Array.isArray(log.suspicionFlags) ? log.suspicionFlags.join("|") : "",
       log.suspicionExcerpt || "",
@@ -920,20 +1032,70 @@ function exportChart() {
   downloadCSV(`mcp-firewall-blocked-${data.group}-${stamp}.csv`, rows);
 }
 
+async function simulateSelected() {
+  if (!selectedLog) {
+    simulateResult.textContent = "Select a log event first.";
+    return;
+  }
+  simulateResult.textContent = "Simulating...";
+  const payload = {
+    policy: policyEditor.value,
+    event: {
+      method: selectedLog.method,
+      name: selectedLog.name,
+      uri: selectedLog.uri,
+    },
+  };
+  const res = await apiFetch("/api/simulate", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    simulateResult.textContent = text || "Simulation failed.";
+    return;
+  }
+  const data = await res.json();
+  const parts = [];
+  if (data.decision) {
+    parts.push(data.decision);
+  }
+  if (data.policyRule) {
+    const pattern = data.policyPattern ? ` (${data.policyPattern})` : "";
+    parts.push(`rule ${data.policyRule}${pattern}`);
+  }
+  if (data.normalized) {
+    parts.push(`normalized ${data.normalized}`);
+  }
+  let summary = parts.join(" · ");
+  if (data.reason) {
+    summary = summary ? `${summary} — ${data.reason}` : data.reason;
+  }
+  simulateResult.textContent = summary || "Simulation complete.";
+}
+
 function bindControls() {
   savePolicyBtn.addEventListener("click", savePolicy);
   reloadPolicyBtn.addEventListener("click", loadPolicy);
   clearLogsBtn.addEventListener("click", () => {
     logs = [];
+    setSelectedLog(null);
     renderLogTable();
     renderChart();
   });
   setTokenBtn.addEventListener("click", promptToken);
   toggleBtn.addEventListener("click", toggleFirewall);
+  if (simulateBtn) {
+    simulateBtn.addEventListener("click", simulateSelected);
+  }
   policyEditor.addEventListener("input", () => {
     updatePolicyHint();
     scheduleWarnings();
     renderDiffIfOpen();
+    if (simulateResult) {
+      simulateResult.textContent = "";
+    }
   });
   [chartGroup, filterDecision, filterMethod, filterTarget].forEach((el) => {
     el.addEventListener("input", () => {

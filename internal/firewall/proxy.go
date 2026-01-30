@@ -8,25 +8,30 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
+	"sync/atomic"
 )
 
 type Proxy struct {
-	policyMu sync.RWMutex
-	policy   Policy
-	logger   *Logger
-	dryRun   bool
-	inspect  InspectorConfig
-	sandbox  SandboxConfig
-	toggle   ToggleConfig
+	policyMu        sync.RWMutex
+	policy          Policy
+	logger          *Logger
+	dryRun          bool
+	enforcementMode string
+	inspect         InspectorConfig
+	sandbox         SandboxConfig
+	toggle          ToggleConfig
 
 	pendingMu sync.Mutex
 	pending   map[string]pendingRequest
+	reqSeq    uint64
 }
 
 type ProxyOptions struct {
 	Logger  *Logger
 	DryRun  bool
+	Mode    string
 	Inspect InspectorConfig
 	Sandbox SandboxConfig
 	Toggle  ToggleConfig
@@ -34,13 +39,14 @@ type ProxyOptions struct {
 
 func NewProxy(policy Policy, opts ProxyOptions) *Proxy {
 	return &Proxy{
-		policy:  policy,
-		logger:  opts.Logger,
-		dryRun:  opts.DryRun,
-		inspect: opts.Inspect,
-		sandbox: opts.Sandbox,
-		toggle:  opts.Toggle,
-		pending: make(map[string]pendingRequest),
+		policy:          policy,
+		logger:          opts.Logger,
+		dryRun:          opts.DryRun,
+		enforcementMode: opts.Mode,
+		inspect:         opts.Inspect,
+		sandbox:         opts.Sandbox,
+		toggle:          opts.Toggle,
+		pending:         make(map[string]pendingRequest),
 	}
 }
 
@@ -136,14 +142,22 @@ func (p *Proxy) forwardClientToServer(ctx context.Context, client *Codec, server
 				decision = "blocked"
 			}
 		}
+		requestID, traceID, rpcID := p.newRequestIDs(msg.ID)
+		detail.requestID = requestID
+		detail.traceID = traceID
 		p.logger.Log(LogEvent{
-			Direction: "client->server",
-			Decision:  decision,
-			Reason:    reason,
-			Method:    msg.Method,
-			ID:        normalizeID(msg.ID),
-			Name:      detail.name,
-			URI:       detail.uri,
+			Direction:     "client->server",
+			Decision:      decision,
+			Reason:        reason,
+			Method:        msg.Method,
+			ID:            rpcID,
+			RequestID:     requestID,
+			TraceID:       traceID,
+			Name:          detail.name,
+			URI:           detail.uri,
+			Normalized:    detail.normalized,
+			PolicyRule:    detail.rule,
+			PolicyPattern: detail.pattern,
 		})
 
 		if !allowed && !p.dryRun {
@@ -195,7 +209,7 @@ func (p *Proxy) forwardServerToClient(ctx context.Context, server *Codec, client
 				continue
 			}
 			policy := p.currentPolicy()
-			allowed, reason := policy.Methods.Allowed(msg.Method)
+			allowed, reason, match := policy.Methods.AllowedMatch(msg.Method)
 			decision := "allowed"
 			if !allowed {
 				if p.dryRun {
@@ -204,12 +218,21 @@ func (p *Proxy) forwardServerToClient(ctx context.Context, server *Codec, client
 					decision = "blocked"
 				}
 			}
+			requestID, traceID, rpcID := p.newRequestIDs(msg.ID)
+			methodRule := "methods"
+			if match.Rule != "" {
+				methodRule = "methods." + match.Rule
+			}
 			p.logger.Log(LogEvent{
-				Direction: "server->client",
-				Decision:  decision,
-				Reason:    reason,
-				Method:    msg.Method,
-				ID:        normalizeID(msg.ID),
+				Direction:     "server->client",
+				Decision:      decision,
+				Reason:        reason,
+				Method:        msg.Method,
+				ID:            rpcID,
+				RequestID:     requestID,
+				TraceID:       traceID,
+				PolicyRule:    methodRule,
+				PolicyPattern: match.Pattern,
 			})
 			if !allowed && !p.dryRun {
 				if hasID(msg.ID) {
@@ -232,18 +255,36 @@ func (p *Proxy) forwardServerToClient(ctx context.Context, server *Codec, client
 			if err != nil {
 				return err
 			}
-			if p.inspect.enabled() && outcome.inspection.Score >= p.inspect.Threshold {
+			if outcome.threshold > 0 && outcome.inspection.Score >= outcome.threshold {
+				reqID := normalizeID(msg.ID)
+				requestID := pending.requestID
+				traceID := pending.traceID
+				if requestID == "" {
+					requestID = reqID
+				}
+				if traceID == "" {
+					if reqID != "" {
+						traceID = reqID
+					} else {
+						traceID = requestID
+					}
+				}
 				p.logger.Log(LogEvent{
-					Direction: "server->client",
-					Decision:  "flagged",
-					Reason:    outcome.reason,
-					Method:    pending.method,
-					ID:        normalizeID(msg.ID),
-					Name:      pending.name,
-					URI:       pending.uri,
-					Score:     outcome.inspection.Score,
-					Flags:     outcome.inspection.Flags,
-					Excerpt:   outcome.inspection.Excerpt,
+					Direction:     "server->client",
+					Decision:      "flagged",
+					Reason:        outcome.reason,
+					Method:        pending.method,
+					ID:            reqID,
+					RequestID:     requestID,
+					TraceID:       traceID,
+					Name:          pending.name,
+					URI:           pending.uri,
+					Normalized:    pending.normalized,
+					PolicyRule:    pending.rule,
+					PolicyPattern: pending.pattern,
+					Score:         outcome.inspection.Score,
+					Flags:         outcome.inspection.Flags,
+					Excerpt:       outcome.inspection.Excerpt,
 				})
 			}
 			if outcome.blocked && !p.dryRun {
@@ -274,34 +315,67 @@ func (p *Proxy) evaluateRequest(method string, params json.RawMessage) (bool, st
 		return true, "firewall disabled", pendingRequest{method: method}
 	}
 	policy := p.currentPolicy()
-	if allowed, reason := policy.Methods.Allowed(method); !allowed {
-		return false, reason, pendingRequest{}
+	allowedMethod, reason, match := policy.Methods.AllowedMatch(method)
+	methodRule := "methods." + match.Rule
+	if methodRule == "methods." {
+		methodRule = "methods"
+	}
+	if !allowedMethod {
+		return false, reason, pendingRequest{method: method, rule: methodRule, pattern: match.Pattern}
 	}
 
 	switch method {
 	case "tools/call":
 		var parsed toolCallParams
 		if err := json.Unmarshal(params, &parsed); err != nil {
-			return true, "", pendingRequest{method: method}
+			return true, "", pendingRequest{method: method, rule: methodRule, pattern: match.Pattern}
 		}
-		allowed, reason := policy.Tools.Allowed(parsed.Name)
-		return allowed, reason, pendingRequest{method: method, name: parsed.Name}
+		allowed, reason, toolMatch := policy.Tools.AllowedMatch(parsed.Name)
+		normalized := parsed.Name
+		if policy.Tools.CaseInsensitive {
+			normalized = strings.ToLower(normalized)
+		}
+		return allowed, reason, pendingRequest{
+			method:     method,
+			name:       parsed.Name,
+			normalized: normalized,
+			rule:       "tools." + toolMatch.Rule,
+			pattern:    toolMatch.Pattern,
+		}
 	case "resources/read":
 		var parsed resourceReadParams
 		if err := json.Unmarshal(params, &parsed); err != nil {
-			return true, "", pendingRequest{method: method}
+			return true, "", pendingRequest{method: method, rule: methodRule, pattern: match.Pattern}
 		}
-		allowed, reason := policy.Resources.Allowed(parsed.URI)
-		return allowed, reason, pendingRequest{method: method, uri: parsed.URI}
+		allowed, reason, resourceMatch := policy.Resources.AllowedMatch(parsed.URI)
+		normalized := normalizeResourceURI(parsed.URI, policy.Resources.Normalize)
+		return allowed, reason, pendingRequest{
+			method:     method,
+			uri:        parsed.URI,
+			scheme:     schemeOf(normalized),
+			normalized: normalized,
+			rule:       "resources." + resourceMatch.Rule,
+			pattern:    resourceMatch.Pattern,
+		}
 	case "prompts/get":
 		var parsed promptGetParams
 		if err := json.Unmarshal(params, &parsed); err != nil {
-			return true, "", pendingRequest{method: method}
+			return true, "", pendingRequest{method: method, rule: methodRule, pattern: match.Pattern}
 		}
-		allowed, reason := policy.Prompts.Allowed(parsed.Name)
-		return allowed, reason, pendingRequest{method: method, name: parsed.Name}
+		allowed, reason, promptMatch := policy.Prompts.AllowedMatch(parsed.Name)
+		normalized := parsed.Name
+		if policy.Prompts.CaseInsensitive {
+			normalized = strings.ToLower(normalized)
+		}
+		return allowed, reason, pendingRequest{
+			method:     method,
+			name:       parsed.Name,
+			normalized: normalized,
+			rule:       "prompts." + promptMatch.Rule,
+			pattern:    promptMatch.Pattern,
+		}
 	default:
-		return true, "", pendingRequest{method: method}
+		return true, "", pendingRequest{method: method, rule: methodRule, pattern: match.Pattern}
 	}
 }
 
@@ -337,11 +411,34 @@ func normalizeID(id json.RawMessage) string {
 	if len(id) == 0 {
 		return ""
 	}
-	trimmed := string(id)
-	if trimmed == "null" {
+	trimmed := strings.TrimSpace(string(id))
+	if trimmed == "" || trimmed == "null" {
 		return ""
 	}
+	var str string
+	if err := json.Unmarshal(id, &str); err == nil {
+		return str
+	}
+	var num json.Number
+	if err := json.Unmarshal(id, &num); err == nil {
+		return num.String()
+	}
 	return trimmed
+}
+
+func (p *Proxy) nextRequestID() string {
+	seq := atomic.AddUint64(&p.reqSeq, 1)
+	return fmt.Sprintf("req-%08d", seq)
+}
+
+func (p *Proxy) newRequestIDs(id json.RawMessage) (string, string, string) {
+	rpcID := normalizeID(id)
+	requestID := p.nextRequestID()
+	traceID := rpcID
+	if traceID == "" {
+		traceID = requestID
+	}
+	return requestID, traceID, rpcID
 }
 
 func blockedResponse(id json.RawMessage, reason string) []byte {
@@ -392,8 +489,30 @@ func (p *Proxy) InspectThreshold() int {
 	return p.inspect.Threshold
 }
 
+func (p *Proxy) InspectToolThreshold() int {
+	return p.inspect.ToolThreshold
+}
+
+func (p *Proxy) InspectResourceThreshold() int {
+	return p.inspect.ResourceThreshold
+}
+
+func (p *Proxy) InspectPromptThreshold() int {
+	return p.inspect.PromptThreshold
+}
+
 func (p *Proxy) Sandbox() SandboxConfig {
 	return p.sandbox
+}
+
+func (p *Proxy) EnforcementMode() string {
+	if p.enforcementMode != "" {
+		return p.enforcementMode
+	}
+	if p.dryRun {
+		return "observe"
+	}
+	return "enforce"
 }
 
 func (p *Proxy) Enabled() bool {

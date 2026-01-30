@@ -7,12 +7,15 @@ import (
 )
 
 type InspectorConfig struct {
-	Enabled    bool
-	Threshold  int
-	MaxChars   int
-	Block      bool
-	Redact     bool
-	LogExcerpt bool
+	Enabled           bool
+	Threshold         int
+	ToolThreshold     int
+	ResourceThreshold int
+	PromptThreshold   int
+	MaxChars          int
+	Block             bool
+	Redact            bool
+	LogExcerpt        bool
 }
 
 type Inspection struct {
@@ -40,11 +43,36 @@ var defaultPatterns = []pattern{
 }
 
 func (cfg InspectorConfig) enabled() bool {
-	return cfg.Enabled && cfg.Threshold > 0
+	if !cfg.Enabled {
+		return false
+	}
+	return cfg.Threshold > 0 || cfg.ToolThreshold > 0 || cfg.ResourceThreshold > 0 || cfg.PromptThreshold > 0
+}
+
+func (cfg InspectorConfig) thresholdFor(kind string) int {
+	switch kind {
+	case "tool":
+		if cfg.ToolThreshold > 0 {
+			return cfg.ToolThreshold
+		}
+	case "resource":
+		if cfg.ResourceThreshold > 0 {
+			return cfg.ResourceThreshold
+		}
+	case "prompt":
+		if cfg.PromptThreshold > 0 {
+			return cfg.PromptThreshold
+		}
+	}
+	return cfg.Threshold
+}
+
+func (cfg InspectorConfig) enabledFor(kind string) bool {
+	return cfg.Enabled && cfg.thresholdFor(kind) > 0
 }
 
 func (cfg InspectorConfig) inspectText(text string) Inspection {
-	if !cfg.enabled() || text == "" {
+	if !cfg.Enabled || text == "" {
 		return Inspection{}
 	}
 	limit := cfg.MaxChars
@@ -72,7 +100,7 @@ func (cfg InspectorConfig) inspectText(text string) Inspection {
 }
 
 func (cfg InspectorConfig) inspectTexts(texts []string) Inspection {
-	if !cfg.enabled() {
+	if !cfg.Enabled {
 		return Inspection{}
 	}
 	combined := strings.Join(texts, "\n")

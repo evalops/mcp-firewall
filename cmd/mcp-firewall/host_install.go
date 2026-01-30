@@ -5,10 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 )
 
 type hostKind string
@@ -52,10 +54,13 @@ type hostServerInfo struct {
 }
 
 type hostFileReport struct {
-	File    hostConfigFile   `json:"file"`
-	Servers []hostServerInfo `json:"servers"`
-	Errors  []string         `json:"errors,omitempty"`
-	Changed bool             `json:"changed"`
+	File       hostConfigFile   `json:"file"`
+	Servers    []hostServerInfo `json:"servers"`
+	Errors     []string         `json:"errors,omitempty"`
+	Changed    bool             `json:"changed"`
+	Restored   bool             `json:"restored,omitempty"`
+	BackupPath string           `json:"backupPath,omitempty"`
+	Diff       string           `json:"diff,omitempty"`
 }
 
 type hostInstallReport struct {
@@ -71,6 +76,7 @@ type hostScanOptions struct {
 type hostInstallOptions struct {
 	FirewallPath string
 	PolicyPath   string
+	Mode         string
 	NoNetwork    bool
 	BestEffort   bool
 	AllowBins    []string
@@ -93,12 +99,15 @@ func discoverHostConfigs(opts hostScanOptions) hostDiscovery {
 	} else {
 		files = append(files, hostConfigFile{Host: hostClaudeDesktop, Scope: scopeUser, Path: filepath.Join(configDir, "Claude", "claude_desktop_config.json")})
 		files = append(files, hostConfigFile{Host: hostCursor, Scope: scopeUser, Path: filepath.Join(configDir, "Cursor", "User", "mcp.json")})
-		files = append(files, hostConfigFile{Host: hostVSCode, Scope: scopeUser, Path: filepath.Join(configDir, "Code", "User", "mcp.json")})
-		profilesDir := filepath.Join(configDir, "Code", "User", "profiles")
-		if entries, err := os.ReadDir(profilesDir); err == nil {
-			for _, entry := range entries {
-				if entry.IsDir() {
-					files = append(files, hostConfigFile{Host: hostVSCode, Scope: scopeProfile, Path: filepath.Join(profilesDir, entry.Name(), "mcp.json")})
+		vscodeDirs := []string{"Code", "Code - Insiders", "VSCodium"}
+		for _, dir := range vscodeDirs {
+			files = append(files, hostConfigFile{Host: hostVSCode, Scope: scopeUser, Path: filepath.Join(configDir, dir, "User", "mcp.json")})
+			profilesDir := filepath.Join(configDir, dir, "User", "profiles")
+			if entries, err := os.ReadDir(profilesDir); err == nil {
+				for _, entry := range entries {
+					if entry.IsDir() {
+						files = append(files, hostConfigFile{Host: hostVSCode, Scope: scopeProfile, Path: filepath.Join(profilesDir, entry.Name(), "mcp.json")})
+					}
 				}
 			}
 		}
@@ -219,22 +228,22 @@ func filterExisting(files []hostConfigFile) []hostConfigFile {
 	return out
 }
 
-func loadConfigFile(file hostConfigFile) (map[string]interface{}, string, error) {
+func loadConfigFile(file hostConfigFile) (map[string]interface{}, string, []byte, error) {
 	data, err := os.ReadFile(file.Path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			root := map[string]interface{}{}
-			return root, defaultServerKey(file.Host), nil
+			return root, defaultServerKey(file.Host), nil, nil
 		}
-		return nil, "", err
+		return nil, "", nil, err
 	}
 	data = stripJSONComments(data)
 	var root map[string]interface{}
 	if err := json.Unmarshal(data, &root); err != nil {
-		return nil, "", err
+		return nil, "", nil, err
 	}
 	key := detectServerKey(root, file.Host)
-	return root, key, nil
+	return root, key, data, nil
 }
 
 func detectServerKey(root map[string]interface{}, host hostKind) string {
@@ -403,6 +412,9 @@ func wrapStdioServer(server map[string]interface{}, opts hostInstallOptions) (bo
 	if opts.PolicyPath != "" {
 		wrappedArgs = append(wrappedArgs, "--policy", opts.PolicyPath)
 	}
+	if opts.Mode != "" {
+		wrappedArgs = append(wrappedArgs, "--mode", opts.Mode)
+	}
 	if opts.NoNetwork {
 		wrappedArgs = append(wrappedArgs, "--no-network")
 	}
@@ -499,18 +511,22 @@ func slugify(value string) string {
 	return strings.Trim(b.String(), "-")
 }
 
-func writeConfigFile(path string, root map[string]interface{}, backup bool, dryRun bool) error {
-	data, err := json.MarshalIndent(root, "", "  ")
-	if err != nil {
-		return err
-	}
+func marshalConfig(root map[string]interface{}) ([]byte, error) {
+	return json.MarshalIndent(root, "", "  ")
+}
+
+func writeConfigFile(path string, data []byte, backup bool, dryRun bool) (string, error) {
 	if dryRun {
-		return nil
+		return "", nil
 	}
+	var backupPath string
 	if backup {
-		if existing, err := os.ReadFile(path); err == nil {
-			bak := path + ".bak"
-			_ = os.WriteFile(bak, existing, 0o600)
+		if _, err := os.Stat(path); err == nil {
+			var err error
+			backupPath, err = backupFile(path)
+			if err != nil {
+				return "", err
+			}
 		}
 	}
 	perm := fs.FileMode(0o600)
@@ -518,9 +534,9 @@ func writeConfigFile(path string, root map[string]interface{}, backup bool, dryR
 		perm = info.Mode().Perm()
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return err
+		return "", err
 	}
-	return os.WriteFile(path, data, perm)
+	return backupPath, os.WriteFile(path, data, perm)
 }
 
 func loadRoutes(path string) (map[string]string, error) {
@@ -546,22 +562,220 @@ func loadRoutes(path string) (map[string]string, error) {
 	return payload.Routes, nil
 }
 
-func writeRoutes(path string, routes map[string]string, dryRun bool) error {
+func writeRoutes(path string, routes map[string]string, backup bool, dryRun bool) (string, error) {
 	if path == "" {
-		return nil
+		return "", nil
 	}
 	payload := struct {
 		Routes map[string]string `json:"routes"`
 	}{Routes: routes}
 	data, err := json.MarshalIndent(payload, "", "  ")
 	if err != nil {
-		return err
+		return "", err
 	}
 	if dryRun {
+		return "", nil
+	}
+	var backupPath string
+	if backup {
+		if _, err := os.Stat(path); err == nil {
+			var err error
+			backupPath, err = backupFile(path)
+			if err != nil {
+				return "", err
+			}
+		}
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return "", err
+	}
+	return backupPath, os.WriteFile(path, data, 0o600)
+}
+
+func backupFile(path string) (string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	ts := time.Now().UTC().Format("20060102-150405")
+	backupPath := fmt.Sprintf("%s.bak-%s", path, ts)
+	if err := os.WriteFile(backupPath, data, 0o600); err != nil {
+		return "", err
+	}
+	return backupPath, nil
+}
+
+func latestBackup(path string) (string, error) {
+	matches, err := filepath.Glob(path + ".bak-*")
+	if err != nil {
+		return "", err
+	}
+	if len(matches) == 0 {
+		return "", os.ErrNotExist
+	}
+	type candidate struct {
+		path string
+		mod  time.Time
+	}
+	best := candidate{}
+	for _, match := range matches {
+		info, err := os.Stat(match)
+		if err != nil {
+			continue
+		}
+		if best.path == "" || info.ModTime().After(best.mod) {
+			best = candidate{path: match, mod: info.ModTime()}
+		}
+	}
+	if best.path == "" {
+		return "", os.ErrNotExist
+	}
+	return best.path, nil
+}
+
+func restoreBackup(path string, backupPath string, dryRun bool) error {
+	if dryRun {
 		return nil
+	}
+	data, err := os.ReadFile(backupPath)
+	if err != nil {
+		return err
+	}
+	perm := fs.FileMode(0o600)
+	if info, err := os.Stat(path); err == nil {
+		perm = info.Mode().Perm()
+	} else if info, err := os.Stat(backupPath); err == nil {
+		perm = info.Mode().Perm()
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
-	return os.WriteFile(path, data, 0o600)
+	return os.WriteFile(path, data, perm)
+}
+
+func diffText(current string, next string) string {
+	if current == next {
+		return ""
+	}
+	currentLines := strings.Split(current, "\n")
+	nextLines := strings.Split(next, "\n")
+	var sb strings.Builder
+	sb.WriteString("--- current\n+++ proposed\n")
+	max := len(currentLines)
+	if len(nextLines) > max {
+		max = len(nextLines)
+	}
+	for i := 0; i < max; i++ {
+		var left, right string
+		if i < len(currentLines) {
+			left = currentLines[i]
+		}
+		if i < len(nextLines) {
+			right = nextLines[i]
+		}
+		if left == right {
+			continue
+		}
+		if left != "" {
+			sb.WriteString("-")
+			sb.WriteString(left)
+			sb.WriteString("\n")
+		}
+		if right != "" {
+			sb.WriteString("+")
+			sb.WriteString(right)
+			sb.WriteString("\n")
+		}
+	}
+	return sb.String()
+}
+
+func isFirewallCommand(command string) bool {
+	base := filepath.Base(command)
+	return base == "mcp-firewall" || strings.HasSuffix(command, "mcp-firewall")
+}
+
+func unwrapStdioServer(server map[string]interface{}) (bool, hostServerInfo, error) {
+	info := hostServerInfo{Transport: "stdio"}
+	command, _ := server["command"].(string)
+	info.Command = command
+	args := extractArgs(server["args"])
+	info.Args = append([]string(nil), args...)
+	if command == "" {
+		info.Message = "missing command"
+		return false, info, nil
+	}
+	if !isFirewallCommand(command) {
+		info.Message = "not wrapped"
+		return false, info, nil
+	}
+	idx := -1
+	for i, arg := range args {
+		if arg == "--" {
+			idx = i
+			break
+		}
+	}
+	if idx == -1 || idx+1 >= len(args) {
+		info.Message = "missing original command"
+		return false, info, nil
+	}
+	originalCmd := args[idx+1]
+	originalArgs := args[idx+2:]
+	server["command"] = originalCmd
+	server["args"] = originalArgs
+	info.Command = originalCmd
+	info.Args = append([]string(nil), originalArgs...)
+	info.Message = "unwrapped firewall"
+	return true, info, nil
+}
+
+func unproxyHTTPServer(name string, server map[string]interface{}, opts hostInstallOptions, routes map[string]string) (bool, hostServerInfo, error) {
+	info := hostServerInfo{Transport: "http"}
+	urlStr, _ := server["url"].(string)
+	info.URL = urlStr
+	if urlStr == "" {
+		info.Message = "missing url"
+		return false, info, nil
+	}
+	basePath := opts.HTTPPath
+	if basePath == "" {
+		basePath = "/mcp"
+	}
+	scheme := "http"
+	host := opts.HTTPListen
+	if strings.HasPrefix(host, "https://") {
+		scheme = "https"
+		host = strings.TrimPrefix(host, "https://")
+	} else if strings.HasPrefix(host, "http://") {
+		host = strings.TrimPrefix(host, "http://")
+	}
+	parsed, err := url.Parse(urlStr)
+	if err != nil {
+		info.Message = "invalid url"
+		return false, info, nil
+	}
+	trimBase := strings.TrimSuffix(basePath, "/")
+	if parsed.Scheme != scheme || parsed.Host != host || !strings.HasPrefix(parsed.Path, trimBase+"/") {
+		info.Message = "not proxied"
+		return false, info, nil
+	}
+	rest := strings.TrimPrefix(parsed.Path, trimBase+"/")
+	parts := strings.Split(rest, "/")
+	if len(parts) == 0 || parts[0] == "" {
+		info.Message = "missing route id"
+		return false, info, nil
+	}
+	routeID := parts[0]
+	if routes != nil {
+		if original, ok := routes[routeID]; ok && original != "" {
+			server["url"] = original
+			info.URL = original
+			delete(routes, routeID)
+			info.Message = "restored from routes"
+			return true, info, nil
+		}
+	}
+	info.Message = "route mapping not found"
+	return false, info, nil
 }

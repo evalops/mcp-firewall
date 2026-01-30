@@ -7,9 +7,15 @@ import (
 )
 
 type pendingRequest struct {
-	method string
-	name   string
-	uri    string
+	method     string
+	name       string
+	uri        string
+	scheme     string
+	rule       string
+	pattern    string
+	normalized string
+	requestID  string
+	traceID    string
 }
 
 type responseOutcome struct {
@@ -17,6 +23,7 @@ type responseOutcome struct {
 	blocked    bool
 	reason     string
 	inspection Inspection
+	threshold  int
 }
 
 func (p *Proxy) processResponse(pending pendingRequest, msg *rpcMessage) (responseOutcome, error) {
@@ -87,8 +94,10 @@ func (p *Proxy) processResponse(pending pendingRequest, msg *rpcMessage) (respon
 			if removed := filterToolResources(policy.Resources, &res); removed > 0 {
 				outcome.modified = true
 			}
+			threshold := p.inspect.thresholdFor("tool")
+			outcome.threshold = threshold
 			outcome.inspection = p.inspect.inspectTexts(extractToolTexts(res))
-			if p.inspect.enabled() && outcome.inspection.Score >= p.inspect.Threshold {
+			if p.inspect.enabledFor("tool") && outcome.inspection.Score >= threshold {
 				outcome.reason = fmt.Sprintf("suspicious tool output (%s)", strings.Join(outcome.inspection.Flags, ","))
 				if p.inspect.Block {
 					outcome.blocked = true
@@ -110,8 +119,10 @@ func (p *Proxy) processResponse(pending pendingRequest, msg *rpcMessage) (respon
 			if removed := filterResourceContents(policy.Resources, &res); removed > 0 {
 				outcome.modified = true
 			}
+			threshold := p.inspect.thresholdFor("resource")
+			outcome.threshold = threshold
 			outcome.inspection = p.inspect.inspectTexts(extractResourceTexts(res))
-			if p.inspect.enabled() && outcome.inspection.Score >= p.inspect.Threshold {
+			if p.inspect.enabledFor("resource") && outcome.inspection.Score >= threshold {
 				outcome.reason = fmt.Sprintf("suspicious resource content (%s)", strings.Join(outcome.inspection.Flags, ","))
 				if p.inspect.Block {
 					outcome.blocked = true
@@ -130,8 +141,10 @@ func (p *Proxy) processResponse(pending pendingRequest, msg *rpcMessage) (respon
 	case "prompts/get":
 		var res promptGetResult
 		if err := json.Unmarshal(msg.Result, &res); err == nil {
+			threshold := p.inspect.thresholdFor("prompt")
+			outcome.threshold = threshold
 			outcome.inspection = p.inspect.inspectTexts(extractPromptTexts(res))
-			if p.inspect.enabled() && outcome.inspection.Score >= p.inspect.Threshold {
+			if p.inspect.enabledFor("prompt") && outcome.inspection.Score >= threshold {
 				outcome.reason = fmt.Sprintf("suspicious prompt content (%s)", strings.Join(outcome.inspection.Flags, ","))
 				if p.inspect.Block {
 					outcome.blocked = true

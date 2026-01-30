@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 
@@ -43,22 +44,26 @@ func (b *uiBackend) Status() uiapi.Status {
 	sandbox := b.core.Sandbox()
 	enabled := b.core.Enabled()
 	return uiapi.Status{
-		Ready:              true,
-		Mode:               b.mode,
-		Upstream:           b.upstream,
-		DryRun:             b.core.DryRun(),
-		InspectEnabled:     b.core.InspectEnabled(),
-		InspectThreshold:   b.core.InspectThreshold(),
-		Tools:              len(policy.Tools.Allow),
-		Resources:          len(policy.Resources.Allow),
-		Prompts:            len(policy.Prompts.Allow),
-		PolicyWritable:     b.allowWrite,
-		PolicyVersion:      current,
-		NoNetwork:          sandbox.NoNetwork,
-		SandboxBestEffort:  sandbox.BestEffort,
-		AllowedBins:        append([]string(nil), sandbox.AllowedBinaries...),
-		EnforcementEnabled: enabled,
-		ToggleFile:         b.core.ToggleFile(),
+		Ready:                    true,
+		Mode:                     b.mode,
+		Upstream:                 b.upstream,
+		EnforcementMode:          b.core.EnforcementMode(),
+		DryRun:                   b.core.DryRun(),
+		InspectEnabled:           b.core.InspectEnabled(),
+		InspectThreshold:         b.core.InspectThreshold(),
+		InspectToolThreshold:     b.core.InspectToolThreshold(),
+		InspectResourceThreshold: b.core.InspectResourceThreshold(),
+		InspectPromptThreshold:   b.core.InspectPromptThreshold(),
+		Tools:                    len(policy.Tools.Allow),
+		Resources:                len(policy.Resources.Allow),
+		Prompts:                  len(policy.Prompts.Allow),
+		PolicyWritable:           b.allowWrite,
+		PolicyVersion:            current,
+		NoNetwork:                sandbox.NoNetwork,
+		SandboxBestEffort:        sandbox.BestEffort,
+		AllowedBins:              append([]string(nil), sandbox.AllowedBinaries...),
+		EnforcementEnabled:       enabled,
+		ToggleFile:               b.core.ToggleFile(),
 	}
 }
 
@@ -176,6 +181,14 @@ func (b *uiBackend) HistoryRollback(id string) error {
 	return nil
 }
 
+func (b *uiBackend) Simulate(policyYAML string, event uiapi.SimulateEvent) (uiapi.SimulateResult, error) {
+	var policy Policy
+	if err := yaml.Unmarshal([]byte(policyYAML), &policy); err != nil {
+		return uiapi.SimulateResult{}, fmt.Errorf("%w: %v", uiapi.ErrInvalidPolicy, err)
+	}
+	return simulateEvent(policy, event), nil
+}
+
 func (b *uiBackend) RecentLogs(limit int) []json.RawMessage {
 	if b.logger == nil {
 		return nil
@@ -236,4 +249,98 @@ func (b *uiBackend) addHistory(reason string, policy Policy, yamlText string) {
 		return
 	}
 	b.history.Add(reason, policy, yamlText)
+}
+
+func simulateEvent(policy Policy, event uiapi.SimulateEvent) uiapi.SimulateResult {
+	result := uiapi.SimulateResult{
+		Method: event.Method,
+		Name:   event.Name,
+		URI:    event.URI,
+	}
+	allowedMethod, reason, match := policy.Methods.AllowedMatch(event.Method)
+	methodRule := "methods"
+	if match.Rule != "" {
+		methodRule = "methods." + match.Rule
+	}
+	if !allowedMethod {
+		result.Decision = "blocked"
+		result.Reason = reason
+		result.PolicyRule = methodRule
+		result.PolicyPattern = match.Pattern
+		return result
+	}
+
+	switch event.Method {
+	case "tools/call":
+		if event.Name == "" {
+			result.Decision = "allowed"
+			result.Reason = "tool name missing (method allowed)"
+			result.PolicyRule = methodRule
+			result.PolicyPattern = match.Pattern
+			return result
+		}
+		allowed, toolReason, toolMatch := policy.Tools.AllowedMatch(event.Name)
+		normalized := event.Name
+		if policy.Tools.CaseInsensitive {
+			normalized = strings.ToLower(normalized)
+		}
+		result.Normalized = normalized
+		result.PolicyRule = "tools." + toolMatch.Rule
+		result.PolicyPattern = toolMatch.Pattern
+		if !allowed {
+			result.Decision = "blocked"
+			result.Reason = toolReason
+			return result
+		}
+		result.Decision = "allowed"
+		return result
+	case "resources/read":
+		if event.URI == "" {
+			result.Decision = "allowed"
+			result.Reason = "resource uri missing (method allowed)"
+			result.PolicyRule = methodRule
+			result.PolicyPattern = match.Pattern
+			return result
+		}
+		allowed, resReason, resMatch := policy.Resources.AllowedMatch(event.URI)
+		result.Normalized = normalizeResourceURI(event.URI, policy.Resources.Normalize)
+		result.PolicyRule = "resources." + resMatch.Rule
+		result.PolicyPattern = resMatch.Pattern
+		if !allowed {
+			result.Decision = "blocked"
+			result.Reason = resReason
+			return result
+		}
+		result.Decision = "allowed"
+		return result
+	case "prompts/get":
+		if event.Name == "" {
+			result.Decision = "allowed"
+			result.Reason = "prompt name missing (method allowed)"
+			result.PolicyRule = methodRule
+			result.PolicyPattern = match.Pattern
+			return result
+		}
+		allowed, promptReason, promptMatch := policy.Prompts.AllowedMatch(event.Name)
+		normalized := event.Name
+		if policy.Prompts.CaseInsensitive {
+			normalized = strings.ToLower(normalized)
+		}
+		result.Normalized = normalized
+		result.PolicyRule = "prompts." + promptMatch.Rule
+		result.PolicyPattern = promptMatch.Pattern
+		if !allowed {
+			result.Decision = "blocked"
+			result.Reason = promptReason
+			return result
+		}
+		result.Decision = "allowed"
+		return result
+	default:
+		result.Decision = "allowed"
+		result.Reason = "method allowed"
+		result.PolicyRule = methodRule
+		result.PolicyPattern = match.Pattern
+		return result
+	}
 }

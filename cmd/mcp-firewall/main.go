@@ -18,51 +18,57 @@ import (
 
 func main() {
 	var (
-		policyPath       string
-		logPath          string
-		logAllowed       bool
-		logBuffer        int
-		dryRun           bool
-		clientFraming    string
-		serverFraming    string
-		listenAddr       string
-		upstreamURL      string
-		httpPath         string
-		uiAddr           string
-		uiPath           string
-		allowOrigins     string
-		routesPath       string
-		maxBodyBytes     int64
-		policyWrite      bool
-		apiToken         string
-		policyHistory    int
-		discover         bool
-		discoverOut      string
-		discoverTimeout  time.Duration
-		protocolVersion  string
-		inspect          bool
-		inspectThreshold int
-		inspectMaxChars  int
-		inspectBlock     bool
-		inspectRedact    bool
-		inspectExcerpt   bool
-		noNetwork        bool
-		noNetworkBest    bool
-		allowBins        stringList
-		enabledFile      string
-		enableToggle     bool
-		disableToggle    bool
-		statusToggle     bool
-		hostScan         bool
-		hostInstall      bool
-		hostOutput       string
-		hostRoots        stringList
-		hostDepth        int
-		hostHTTPListen   string
-		hostHTTPPath     string
-		hostRoutes       string
-		hostDryRun       bool
-		hostBackup       bool
+		policyPath               string
+		logPath                  string
+		logAllowed               bool
+		logBuffer                int
+		dryRun                   bool
+		mode                     string
+		clientFraming            string
+		serverFraming            string
+		listenAddr               string
+		upstreamURL              string
+		httpPath                 string
+		uiAddr                   string
+		uiPath                   string
+		allowOrigins             string
+		routesPath               string
+		maxBodyBytes             int64
+		policyWrite              bool
+		apiToken                 string
+		policyHistory            int
+		discover                 bool
+		discoverOut              string
+		discoverTimeout          time.Duration
+		protocolVersion          string
+		inspect                  bool
+		inspectThreshold         int
+		inspectToolThreshold     int
+		inspectResourceThreshold int
+		inspectPromptThreshold   int
+		inspectMaxChars          int
+		inspectBlock             bool
+		inspectRedact            bool
+		inspectExcerpt           bool
+		noNetwork                bool
+		noNetworkBest            bool
+		allowBins                stringList
+		enabledFile              string
+		enableToggle             bool
+		disableToggle            bool
+		statusToggle             bool
+		hostScan                 bool
+		hostInstall              bool
+		hostUninstall            bool
+		hostRestore              bool
+		hostOutput               string
+		hostRoots                stringList
+		hostDepth                int
+		hostHTTPListen           string
+		hostHTTPPath             string
+		hostRoutes               string
+		hostDryRun               bool
+		hostBackup               bool
 	)
 
 	flag.StringVar(&policyPath, "policy", "", "Path to YAML policy file")
@@ -70,6 +76,7 @@ func main() {
 	flag.BoolVar(&logAllowed, "log-allowed", false, "Log allowed traffic in addition to blocked")
 	flag.IntVar(&logBuffer, "log-buffer", 1000, "In-memory log buffer size for the GUI (0 to disable)")
 	flag.BoolVar(&dryRun, "dry-run", false, "Log what would be blocked, but allow")
+	flag.StringVar(&mode, "mode", "", "Enforcement mode: observe|enforce|contain")
 	flag.StringVar(&clientFraming, "client-framing", "auto", "Framing for client side: auto|lsp|line")
 	flag.StringVar(&serverFraming, "server-framing", "line", "Framing for server side: auto|lsp|line")
 	flag.StringVar(&listenAddr, "listen", "", "Listen address for HTTP mode (e.g. 127.0.0.1:8080)")
@@ -89,6 +96,9 @@ func main() {
 	flag.StringVar(&protocolVersion, "protocol-version", "2025-06-18", "MCP protocol version for discover mode")
 	flag.BoolVar(&inspect, "inspect", false, "Inspect tool/resource/prompt outputs for prompt-injection patterns")
 	flag.IntVar(&inspectThreshold, "inspect-threshold", 5, "Suspicion score threshold to flag outputs")
+	flag.IntVar(&inspectToolThreshold, "inspect-threshold-tools", 0, "Suspicion threshold for tool outputs (overrides --inspect-threshold)")
+	flag.IntVar(&inspectResourceThreshold, "inspect-threshold-resources", 0, "Suspicion threshold for resource outputs (overrides --inspect-threshold)")
+	flag.IntVar(&inspectPromptThreshold, "inspect-threshold-prompts", 0, "Suspicion threshold for prompt outputs (overrides --inspect-threshold)")
 	flag.IntVar(&inspectMaxChars, "inspect-max-chars", 20000, "Max chars to scan for inspection")
 	flag.BoolVar(&inspectBlock, "inspect-block", false, "Block responses with suspicious output")
 	flag.BoolVar(&inspectRedact, "inspect-redact", false, "Redact suspicious output text")
@@ -102,6 +112,8 @@ func main() {
 	flag.BoolVar(&statusToggle, "status", false, "Show enforcement status from the enabled file and exit")
 	flag.BoolVar(&hostScan, "host-scan", false, "Discover MCP host configuration files and print a report")
 	flag.BoolVar(&hostInstall, "host-install", false, "Wrap MCP host servers with the firewall")
+	flag.BoolVar(&hostUninstall, "host-uninstall", false, "Remove the firewall wrapper/proxy from host configs")
+	flag.BoolVar(&hostRestore, "host-restore", false, "Restore host configs from latest backups (use with --host-uninstall)")
 	flag.StringVar(&hostOutput, "host-output", "", "Write host discovery/install report to this file (default stdout)")
 	flag.Var(&hostRoots, "host-root", "Workspace root to scan for .vscode/mcp.json or .cursor/mcp.json (repeatable or comma-separated)")
 	flag.IntVar(&hostDepth, "host-depth", 4, "Max directory depth to scan under --host-root")
@@ -109,7 +121,7 @@ func main() {
 	flag.StringVar(&hostHTTPPath, "host-http-path", "/mcp", "HTTP base path to use for proxied MCP servers")
 	flag.StringVar(&hostRoutes, "host-routes", "", "Routes config path for HTTP proxy (default ~/.mcp-firewall/routes.json)")
 	flag.BoolVar(&hostDryRun, "host-dry-run", false, "Show changes without writing host config files")
-	flag.BoolVar(&hostBackup, "host-backup", true, "Write .bak files when modifying host configs")
+	flag.BoolVar(&hostBackup, "host-backup", true, "Write timestamped .bak files when modifying host configs")
 
 	flag.Usage = func() {
 		_, _ = fmt.Fprintln(flag.CommandLine.Output(), "Usage:")
@@ -154,7 +166,54 @@ func main() {
 		}
 	}
 
-	if hostScan || hostInstall {
+	if !inspect && (inspectThreshold > 0 || inspectToolThreshold > 0 || inspectResourceThreshold > 0 || inspectPromptThreshold > 0) {
+		inspect = true
+	}
+
+	mode = strings.ToLower(strings.TrimSpace(mode))
+	enforcementMode := ""
+	if mode != "" {
+		switch mode {
+		case "observe":
+			dryRun = true
+			enforcementMode = "observe"
+		case "enforce":
+			dryRun = false
+			enforcementMode = "enforce"
+		case "contain":
+			dryRun = false
+			enforcementMode = "contain"
+			if !noNetwork {
+				noNetwork = true
+			}
+		default:
+			fmt.Fprintf(os.Stderr, "invalid --mode %q (expected observe|enforce|contain)\n", mode)
+			os.Exit(2)
+		}
+	} else {
+		if dryRun {
+			enforcementMode = "observe"
+		} else {
+			enforcementMode = "enforce"
+		}
+		if enforcementMode == "enforce" && (noNetwork || len(allowBins) > 0) {
+			enforcementMode = "contain"
+		}
+	}
+	if enforcementMode == "contain" && len(allowBins) == 0 {
+		fmt.Fprintln(os.Stderr, "warning: contain mode without --allow-bin still permits arbitrary binaries")
+	}
+
+	if hostInstall && hostUninstall {
+		fmt.Fprintln(os.Stderr, "--host-install and --host-uninstall are mutually exclusive")
+		os.Exit(2)
+	}
+	if hostRestore && !hostUninstall {
+		fmt.Fprintln(os.Stderr, "--host-restore requires --host-uninstall")
+		os.Exit(2)
+	}
+
+	if hostScan || hostInstall || hostUninstall {
 		if hostRoutes == "" {
 			hostRoutes = defaultRoutesPath()
 		}
@@ -164,6 +223,7 @@ func main() {
 		scan := discoverHostConfigs(hostScanOptions{Roots: hostRoots, MaxDepth: hostDepth})
 		report := hostInstallReport{}
 		var routes map[string]string
+		routesChanged := false
 		fwPath := ""
 		if len(scan.Errors) > 0 {
 			report.Errors = append(report.Errors, scan.Errors...)
@@ -183,8 +243,22 @@ func main() {
 				routes = map[string]string{}
 			}
 		}
+		if hostUninstall {
+			if enabledFile == "" {
+				enabledFile = defaultTogglePath()
+			}
+			loaded, err := loadRoutes(hostRoutes)
+			if err != nil {
+				report.Errors = append(report.Errors, err.Error())
+			} else {
+				routes = loaded
+			}
+			if routes == nil {
+				routes = map[string]string{}
+			}
+		}
 		for _, file := range scan.Files {
-			root, key, err := loadConfigFile(file)
+			root, key, _, err := loadConfigFile(file)
 			fileReport := hostFileReport{File: file}
 			if err != nil {
 				fileReport.Errors = append(fileReport.Errors, err.Error())
@@ -192,7 +266,7 @@ func main() {
 				continue
 			}
 			servers := parseServers(root, key)
-			if !hostInstall {
+			if !hostInstall && !hostUninstall {
 				for name, server := range servers {
 					transport := detectTransport(server)
 					info := hostServerInfo{Name: name, Transport: transport, OriginPath: file.Path}
@@ -213,6 +287,79 @@ func main() {
 				continue
 			}
 
+			originalData, _ := marshalConfig(root)
+
+			if hostUninstall {
+				if hostRestore {
+					if backupPath, err := latestBackup(file.Path); err == nil {
+						if backupBytes, err := os.ReadFile(backupPath); err == nil && hostDryRun {
+							fileReport.Diff = diffText(string(originalData), string(backupBytes))
+						}
+						if err := restoreBackup(file.Path, backupPath, hostDryRun); err != nil {
+							fileReport.Errors = append(fileReport.Errors, err.Error())
+						} else {
+							fileReport.Restored = true
+							fileReport.Changed = true
+							fileReport.BackupPath = backupPath
+						}
+					} else {
+						fileReport.Errors = append(fileReport.Errors, err.Error())
+					}
+					report.Files = append(report.Files, fileReport)
+					continue
+				}
+				changed := false
+				for name, server := range servers {
+					transport := detectTransport(server)
+					if transport == "stdio" {
+						updated, info, err := unwrapStdioServer(server)
+						info.Name = name
+						info.OriginPath = file.Path
+						if err != nil {
+							fileReport.Errors = append(fileReport.Errors, err.Error())
+						} else {
+							fileReport.Servers = append(fileReport.Servers, info)
+						}
+						changed = changed || updated
+						continue
+					}
+					if transport == "http" {
+						updated, info, err := unproxyHTTPServer(name, server, hostInstallOptions{
+							HTTPListen: hostHTTPListen,
+							HTTPPath:   hostHTTPPath,
+							RoutesPath: hostRoutes,
+						}, routes)
+						info.Name = name
+						info.OriginPath = file.Path
+						if err != nil {
+							fileReport.Errors = append(fileReport.Errors, err.Error())
+						} else {
+							fileReport.Servers = append(fileReport.Servers, info)
+						}
+						changed = changed || updated
+						routesChanged = routesChanged || updated
+					}
+				}
+				if changed {
+					root[key] = servers
+					if nextData, err := marshalConfig(root); err == nil {
+						if hostDryRun {
+							fileReport.Diff = diffText(string(originalData), string(nextData))
+						}
+						if backupPath, err := writeConfigFile(file.Path, nextData, hostBackup, hostDryRun); err != nil {
+							fileReport.Errors = append(fileReport.Errors, err.Error())
+						} else {
+							fileReport.BackupPath = backupPath
+						}
+					} else {
+						fileReport.Errors = append(fileReport.Errors, err.Error())
+					}
+					fileReport.Changed = true
+				}
+				report.Files = append(report.Files, fileReport)
+				continue
+			}
+
 			changed := false
 			for name, server := range servers {
 				transport := detectTransport(server)
@@ -220,6 +367,7 @@ func main() {
 					updated, info, err := wrapStdioServer(server, hostInstallOptions{
 						FirewallPath: fwPath,
 						PolicyPath:   policyPath,
+						Mode:         enforcementMode,
 						NoNetwork:    noNetwork,
 						BestEffort:   noNetworkBest,
 						AllowBins:    allowBins,
@@ -254,11 +402,21 @@ func main() {
 						fileReport.Servers = append(fileReport.Servers, info)
 					}
 					changed = changed || updated
+					routesChanged = routesChanged || updated
 				}
 			}
 			if changed {
 				root[key] = servers
-				if err := writeConfigFile(file.Path, root, hostBackup, hostDryRun); err != nil {
+				if nextData, err := marshalConfig(root); err == nil {
+					if hostDryRun {
+						fileReport.Diff = diffText(string(originalData), string(nextData))
+					}
+					if backupPath, err := writeConfigFile(file.Path, nextData, hostBackup, hostDryRun); err != nil {
+						fileReport.Errors = append(fileReport.Errors, err.Error())
+					} else {
+						fileReport.BackupPath = backupPath
+					}
+				} else {
 					fileReport.Errors = append(fileReport.Errors, err.Error())
 				}
 				fileReport.Changed = true
@@ -266,14 +424,32 @@ func main() {
 			report.Files = append(report.Files, fileReport)
 		}
 
-		if hostInstall {
-			if err := writeRoutes(hostRoutes, routes, hostDryRun); err != nil {
+		if hostInstall && routesChanged {
+			if _, err := writeRoutes(hostRoutes, routes, hostBackup, hostDryRun); err != nil {
 				report.Errors = append(report.Errors, err.Error())
+			}
+		}
+		if hostUninstall {
+			if hostRestore {
+				if backupPath, err := latestBackup(hostRoutes); err == nil {
+					if err := restoreBackup(hostRoutes, backupPath, hostDryRun); err != nil {
+						report.Errors = append(report.Errors, err.Error())
+					}
+				}
+			} else if routesChanged {
+				if _, err := writeRoutes(hostRoutes, routes, hostBackup, hostDryRun); err != nil {
+					report.Errors = append(report.Errors, err.Error())
+				}
 			}
 		}
 
 		if hostInstall && enabledFile != "" && !hostDryRun {
 			if err := setToggle(enabledFile, true); err != nil {
+				report.Errors = append(report.Errors, err.Error())
+			}
+		}
+		if hostUninstall && enabledFile != "" && !hostDryRun {
+			if err := setToggle(enabledFile, false); err != nil {
 				report.Errors = append(report.Errors, err.Error())
 			}
 		}
@@ -324,16 +500,20 @@ func main() {
 		MaxBuffer:  logBuffer,
 	})
 	inspectCfg := firewall.InspectorConfig{
-		Enabled:    inspect,
-		Threshold:  inspectThreshold,
-		MaxChars:   inspectMaxChars,
-		Block:      inspectBlock,
-		Redact:     inspectRedact,
-		LogExcerpt: inspectExcerpt,
+		Enabled:           inspect,
+		Threshold:         inspectThreshold,
+		ToolThreshold:     inspectToolThreshold,
+		ResourceThreshold: inspectResourceThreshold,
+		PromptThreshold:   inspectPromptThreshold,
+		MaxChars:          inspectMaxChars,
+		Block:             inspectBlock,
+		Redact:            inspectRedact,
+		LogExcerpt:        inspectExcerpt,
 	}
 	opts := firewall.ProxyOptions{
 		Logger:  logger,
 		DryRun:  dryRun,
+		Mode:    enforcementMode,
 		Inspect: inspectCfg,
 		Sandbox: firewall.SandboxConfig{
 			NoNetwork:       noNetwork,
