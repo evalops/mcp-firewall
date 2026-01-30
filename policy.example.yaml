@@ -1,0 +1,30 @@
+# Example MCP firewall policy.
+# Use glob patterns; deny rules take precedence over allow rules.
+
+methods:
+  allow: []
+  deny: []
+
+tools:
+  allow:
+    - "cli.*"
+    - "shell.*"
+  deny:
+    - "email.*"
+    - "web.*"
+    - "github.*"
+
+resources:
+  allow_schemes:
+    - "file"
+    - "local"
+  deny_schemes:
+    - "http"
+    - "https"
+    - "smtp"
+    - "imap"
+    - "s3"
+
+prompts:
+  allow: []
+  deny: []
