@@ -4,6 +4,31 @@ A small MCP (Model Context Protocol) firewall that proxies JSON-RPC and enforces
 
 Important: policy controls intent, containment controls capability. If you allow a CLI tool, that tool can still reach external data unless you enable containment (`--no-network` + `--allow-bin`).
 
+## Easy setup (host-wide in minutes)
+
+1) Build:
+
+```sh
+go build ./cmd/mcp-firewall
+```
+
+2) Scan + install (wrap stdio servers, proxy HTTP servers):
+
+```sh
+./mcp-firewall --host-scan --host-root .
+./mcp-firewall --host-install --policy policy.example.yaml --host-root . --no-network --allow-bin git
+```
+
+3) Run the HTTP proxy + GUI (for HTTP upstreams and the dashboard):
+
+```sh
+./mcp-firewall --listen 127.0.0.1:17880 --routes ~/.mcp-firewall/routes.json --path /mcp --ui 127.0.0.1:8081
+```
+
+Open `http://127.0.0.1:8081/ui`.
+
+Tip: use `--host-dry-run` to preview changes, and `--host-uninstall --host-restore` to roll back.
+
 ## Quick start (stdio)
 
 Build:
