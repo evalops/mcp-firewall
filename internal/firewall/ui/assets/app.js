@@ -995,6 +995,8 @@ function exportLogs() {
       "suspicionScore",
       "suspicionFlags",
       "suspicionExcerpt",
+      "classifier",
+      "classifierScore",
     ],
   ];
   filtered.forEach((log) => {
@@ -1016,6 +1018,8 @@ function exportLogs() {
       log.suspicionScore || "",
       Array.isArray(log.suspicionFlags) ? log.suspicionFlags.join("|") : "",
       log.suspicionExcerpt || "",
+      log.classifier || "",
+      log.classifierScore || "",
     ]);
   });
   const stamp = new Date().toISOString().slice(0, 10);

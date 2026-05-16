@@ -202,7 +202,7 @@ func (p *HTTPProxy) handlePOST(w http.ResponseWriter, r *http.Request) {
 		}
 		var respMsg rpcMessage
 		if err := json.Unmarshal(respBody, &respMsg); err == nil {
-			outcome, err := p.core.processResponse(detail, &respMsg)
+			outcome, err := p.core.processResponse(r.Context(), detail, &respMsg)
 			if err == nil {
 				if outcome.threshold > 0 && outcome.inspection.Score >= outcome.threshold {
 					reqID := normalizeID(respMsg.ID)
@@ -219,21 +219,23 @@ func (p *HTTPProxy) handlePOST(w http.ResponseWriter, r *http.Request) {
 						}
 					}
 					p.core.logger.Log(LogEvent{
-						Direction:     "server->client",
-						Decision:      "flagged",
-						Reason:        outcome.reason,
-						Method:        detail.method,
-						ID:            reqID,
-						RequestID:     requestID,
-						TraceID:       traceID,
-						Name:          detail.name,
-						URI:           detail.uri,
-						Normalized:    detail.normalized,
-						PolicyRule:    detail.rule,
-						PolicyPattern: detail.pattern,
-						Score:         outcome.inspection.Score,
-						Flags:         outcome.inspection.Flags,
-						Excerpt:       outcome.inspection.Excerpt,
+						Direction:       "server->client",
+						Decision:        "flagged",
+						Reason:          outcome.reason,
+						Method:          detail.method,
+						ID:              reqID,
+						RequestID:       requestID,
+						TraceID:         traceID,
+						Name:            detail.name,
+						URI:             detail.uri,
+						Normalized:      detail.normalized,
+						PolicyRule:      detail.rule,
+						PolicyPattern:   detail.pattern,
+						Score:           outcome.inspection.Score,
+						Flags:           outcome.inspection.Flags,
+						Excerpt:         outcome.inspection.Excerpt,
+						Classifier:      outcome.inspection.ClassifierProvider,
+						ClassifierScore: outcome.inspection.ClassifierScore,
 					})
 				}
 				if outcome.blocked && !p.core.dryRun {
@@ -423,7 +425,7 @@ func (p *HTTPProxy) pipeSSE(w http.ResponseWriter, body io.Reader, pending pendi
 						// Not the response we are tracking; pass through.
 						goto writeEvent
 					}
-					outcome, err := p.core.processResponse(pending, &msg)
+					outcome, err := p.core.processResponse(context.Background(), pending, &msg)
 					if err == nil {
 						if outcome.threshold > 0 && outcome.inspection.Score >= outcome.threshold {
 							reqID := normalizeID(msg.ID)
@@ -440,21 +442,23 @@ func (p *HTTPProxy) pipeSSE(w http.ResponseWriter, body io.Reader, pending pendi
 								}
 							}
 							p.core.logger.Log(LogEvent{
-								Direction:     "server->client",
-								Decision:      "flagged",
-								Reason:        outcome.reason,
-								Method:        pending.method,
-								ID:            reqID,
-								RequestID:     requestID,
-								TraceID:       traceID,
-								Name:          pending.name,
-								URI:           pending.uri,
-								Normalized:    pending.normalized,
-								PolicyRule:    pending.rule,
-								PolicyPattern: pending.pattern,
-								Score:         outcome.inspection.Score,
-								Flags:         outcome.inspection.Flags,
-								Excerpt:       outcome.inspection.Excerpt,
+								Direction:       "server->client",
+								Decision:        "flagged",
+								Reason:          outcome.reason,
+								Method:          pending.method,
+								ID:              reqID,
+								RequestID:       requestID,
+								TraceID:         traceID,
+								Name:            pending.name,
+								URI:             pending.uri,
+								Normalized:      pending.normalized,
+								PolicyRule:      pending.rule,
+								PolicyPattern:   pending.pattern,
+								Score:           outcome.inspection.Score,
+								Flags:           outcome.inspection.Flags,
+								Excerpt:         outcome.inspection.Excerpt,
+								Classifier:      outcome.inspection.ClassifierProvider,
+								ClassifierScore: outcome.inspection.ClassifierScore,
 							})
 						}
 						if outcome.blocked && !p.core.dryRun {

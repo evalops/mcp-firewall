@@ -1,6 +1,7 @@
 package firewall
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -26,7 +27,7 @@ type responseOutcome struct {
 	threshold  int
 }
 
-func (p *Proxy) processResponse(pending pendingRequest, msg *rpcMessage) (responseOutcome, error) {
+func (p *Proxy) processResponse(ctx context.Context, pending pendingRequest, msg *rpcMessage) (responseOutcome, error) {
 	outcome := responseOutcome{}
 	if msg.Result == nil {
 		return outcome, nil
@@ -96,7 +97,7 @@ func (p *Proxy) processResponse(pending pendingRequest, msg *rpcMessage) (respon
 			}
 			threshold := p.inspect.thresholdFor("tool")
 			outcome.threshold = threshold
-			outcome.inspection = p.inspect.inspectTexts(extractToolTexts(res))
+			outcome.inspection = p.inspect.inspectTexts(ctx, "tool", extractToolTexts(res))
 			if p.inspect.enabledFor("tool") && outcome.inspection.Score >= threshold {
 				outcome.reason = fmt.Sprintf("suspicious tool output (%s)", strings.Join(outcome.inspection.Flags, ","))
 				if p.inspect.Block {
@@ -121,7 +122,7 @@ func (p *Proxy) processResponse(pending pendingRequest, msg *rpcMessage) (respon
 			}
 			threshold := p.inspect.thresholdFor("resource")
 			outcome.threshold = threshold
-			outcome.inspection = p.inspect.inspectTexts(extractResourceTexts(res))
+			outcome.inspection = p.inspect.inspectTexts(ctx, "resource", extractResourceTexts(res))
 			if p.inspect.enabledFor("resource") && outcome.inspection.Score >= threshold {
 				outcome.reason = fmt.Sprintf("suspicious resource content (%s)", strings.Join(outcome.inspection.Flags, ","))
 				if p.inspect.Block {
@@ -143,7 +144,7 @@ func (p *Proxy) processResponse(pending pendingRequest, msg *rpcMessage) (respon
 		if err := json.Unmarshal(msg.Result, &res); err == nil {
 			threshold := p.inspect.thresholdFor("prompt")
 			outcome.threshold = threshold
-			outcome.inspection = p.inspect.inspectTexts(extractPromptTexts(res))
+			outcome.inspection = p.inspect.inspectTexts(ctx, "prompt", extractPromptTexts(res))
 			if p.inspect.enabledFor("prompt") && outcome.inspection.Score >= threshold {
 				outcome.reason = fmt.Sprintf("suspicious prompt content (%s)", strings.Join(outcome.inspection.Flags, ","))
 				if p.inspect.Block {

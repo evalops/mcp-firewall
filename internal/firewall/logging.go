@@ -18,23 +18,25 @@ type Logger struct {
 }
 
 type LogEvent struct {
-	Seq           uint64   `json:"seq,omitempty"`
-	TS            string   `json:"ts"`
-	Direction     string   `json:"direction"`
-	Decision      string   `json:"decision"`
-	Reason        string   `json:"reason,omitempty"`
-	Method        string   `json:"method,omitempty"`
-	ID            string   `json:"id,omitempty"`
-	RequestID     string   `json:"requestId,omitempty"`
-	TraceID       string   `json:"traceId,omitempty"`
-	Name          string   `json:"name,omitempty"`
-	URI           string   `json:"uri,omitempty"`
-	Normalized    string   `json:"normalized,omitempty"`
-	PolicyRule    string   `json:"policyRule,omitempty"`
-	PolicyPattern string   `json:"policyPattern,omitempty"`
-	Score         int      `json:"suspicionScore,omitempty"`
-	Flags         []string `json:"suspicionFlags,omitempty"`
-	Excerpt       string   `json:"suspicionExcerpt,omitempty"`
+	Seq             uint64   `json:"seq,omitempty"`
+	TS              string   `json:"ts"`
+	Direction       string   `json:"direction"`
+	Decision        string   `json:"decision"`
+	Reason          string   `json:"reason,omitempty"`
+	Method          string   `json:"method,omitempty"`
+	ID              string   `json:"id,omitempty"`
+	RequestID       string   `json:"requestId,omitempty"`
+	TraceID         string   `json:"traceId,omitempty"`
+	Name            string   `json:"name,omitempty"`
+	URI             string   `json:"uri,omitempty"`
+	Normalized      string   `json:"normalized,omitempty"`
+	PolicyRule      string   `json:"policyRule,omitempty"`
+	PolicyPattern   string   `json:"policyPattern,omitempty"`
+	Score           int      `json:"suspicionScore,omitempty"`
+	Flags           []string `json:"suspicionFlags,omitempty"`
+	Excerpt         string   `json:"suspicionExcerpt,omitempty"`
+	Classifier      string   `json:"classifier,omitempty"`
+	ClassifierScore float64  `json:"classifierScore,omitempty"`
 }
 
 type LoggerOptions struct {
