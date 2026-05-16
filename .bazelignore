@@ -1,0 +1,8 @@
+.git
+.local
+.tools
+.worktrees
+bazel-bin
+bazel-mcp-firewall
+bazel-out
+bazel-testlogs

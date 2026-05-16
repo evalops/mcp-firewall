@@ -1,0 +1,6 @@
+load("@gazelle//:def.bzl", "gazelle")
+
+# gazelle:prefix mcp-firewall
+# gazelle:build_file_name BUILD.bazel
+# gazelle:proto disable_global
+gazelle(name = "gazelle")

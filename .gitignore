@@ -1,0 +1,4 @@
+bazel-bin
+bazel-mcp-firewall
+bazel-out
+bazel-testlogs
