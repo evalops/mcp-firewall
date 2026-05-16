@@ -735,9 +735,15 @@ func parseHeaders(values []string) map[string]string {
 		if value == "" {
 			continue
 		}
-		name, headerValue, found := strings.Cut(value, ":")
-		if !found {
+		name := ""
+		headerValue := ""
+		found := false
+		equalIndex := strings.Index(value, "=")
+		colonIndex := strings.Index(value, ":")
+		if equalIndex >= 0 && (colonIndex < 0 || equalIndex < colonIndex) {
 			name, headerValue, found = strings.Cut(value, "=")
+		} else {
+			name, headerValue, found = strings.Cut(value, ":")
 		}
 		if !found {
 			continue

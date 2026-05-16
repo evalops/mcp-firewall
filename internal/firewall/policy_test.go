@@ -89,6 +89,25 @@ func TestInspectorUsesExternalClassifier(t *testing.T) {
 	}
 }
 
+func TestClassifierBlockActionUsesFullContribution(t *testing.T) {
+	inspection := ClassifierConfig{
+		Provider:  "purplellama",
+		Threshold: 0.7,
+	}.inspectionFromResponse(classifierResponse{
+		Action: "block",
+	})
+
+	if inspection.Score != 10 {
+		t.Fatalf("inspection score = %d, want 10", inspection.Score)
+	}
+	if inspection.ClassifierProvider != "purplellama" || inspection.ClassifierScore != 0 {
+		t.Fatalf("classifier fields = %#v", inspection)
+	}
+	if !containsString(inspection.Flags, "purplellama:flagged") {
+		t.Fatalf("classifier flags = %#v", inspection.Flags)
+	}
+}
+
 func containsString(values []string, want string) bool {
 	for _, value := range values {
 		if value == want {

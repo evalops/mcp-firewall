@@ -213,11 +213,15 @@ func (cfg ClassifierConfig) inspectionFromResponse(response classifierResponse) 
 	}
 	label := strings.TrimSpace(response.Label)
 	action := strings.ToLower(strings.TrimSpace(response.Action))
+	blockingAction := action == "block" || action == "deny"
 	flags := prefixedClassifierFlags(cfg.Provider, label, response.Flags, response.Categories)
-	if score < threshold && label == "" && action != "block" && action != "deny" {
+	if score < threshold && label == "" && !blockingAction {
 		return Inspection{ClassifierProvider: strings.TrimSpace(cfg.Provider), ClassifierScore: score}
 	}
 	contribution := int(math.Ceil(score * 10))
+	if blockingAction && contribution < 10 {
+		contribution = 10
+	}
 	if contribution <= 0 {
 		contribution = 1
 	}
