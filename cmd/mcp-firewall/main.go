@@ -18,57 +18,62 @@ import (
 
 func main() {
 	var (
-		policyPath               string
-		logPath                  string
-		logAllowed               bool
-		logBuffer                int
-		dryRun                   bool
-		mode                     string
-		clientFraming            string
-		serverFraming            string
-		listenAddr               string
-		upstreamURL              string
-		httpPath                 string
-		uiAddr                   string
-		uiPath                   string
-		allowOrigins             string
-		routesPath               string
-		maxBodyBytes             int64
-		policyWrite              bool
-		apiToken                 string
-		policyHistory            int
-		discover                 bool
-		discoverOut              string
-		discoverTimeout          time.Duration
-		protocolVersion          string
-		inspect                  bool
-		inspectThreshold         int
-		inspectToolThreshold     int
-		inspectResourceThreshold int
-		inspectPromptThreshold   int
-		inspectMaxChars          int
-		inspectBlock             bool
-		inspectRedact            bool
-		inspectExcerpt           bool
-		noNetwork                bool
-		noNetworkBest            bool
-		allowBins                stringList
-		enabledFile              string
-		enableToggle             bool
-		disableToggle            bool
-		statusToggle             bool
-		hostScan                 bool
-		hostInstall              bool
-		hostUninstall            bool
-		hostRestore              bool
-		hostOutput               string
-		hostRoots                stringList
-		hostDepth                int
-		hostHTTPListen           string
-		hostHTTPPath             string
-		hostRoutes               string
-		hostDryRun               bool
-		hostBackup               bool
+		policyPath                 string
+		logPath                    string
+		logAllowed                 bool
+		logBuffer                  int
+		dryRun                     bool
+		mode                       string
+		clientFraming              string
+		serverFraming              string
+		listenAddr                 string
+		upstreamURL                string
+		httpPath                   string
+		uiAddr                     string
+		uiPath                     string
+		allowOrigins               string
+		routesPath                 string
+		maxBodyBytes               int64
+		policyWrite                bool
+		apiToken                   string
+		policyHistory              int
+		discover                   bool
+		discoverOut                string
+		discoverTimeout            time.Duration
+		protocolVersion            string
+		inspect                    bool
+		inspectThreshold           int
+		inspectToolThreshold       int
+		inspectResourceThreshold   int
+		inspectPromptThreshold     int
+		inspectMaxChars            int
+		inspectBlock               bool
+		inspectRedact              bool
+		inspectExcerpt             bool
+		inspectClassifierURL       string
+		inspectClassifierProvider  string
+		inspectClassifierThreshold float64
+		inspectClassifierTimeout   time.Duration
+		inspectClassifierHeaders   stringList
+		noNetwork                  bool
+		noNetworkBest              bool
+		allowBins                  stringList
+		enabledFile                string
+		enableToggle               bool
+		disableToggle              bool
+		statusToggle               bool
+		hostScan                   bool
+		hostInstall                bool
+		hostUninstall              bool
+		hostRestore                bool
+		hostOutput                 string
+		hostRoots                  stringList
+		hostDepth                  int
+		hostHTTPListen             string
+		hostHTTPPath               string
+		hostRoutes                 string
+		hostDryRun                 bool
+		hostBackup                 bool
 	)
 
 	flag.StringVar(&policyPath, "policy", "", "Path to YAML policy file")
@@ -103,6 +108,11 @@ func main() {
 	flag.BoolVar(&inspectBlock, "inspect-block", false, "Block responses with suspicious output")
 	flag.BoolVar(&inspectRedact, "inspect-redact", false, "Redact suspicious output text")
 	flag.BoolVar(&inspectExcerpt, "inspect-excerpt", false, "Log short excerpt for suspicious matches")
+	flag.StringVar(&inspectClassifierURL, "inspect-classifier-url", "", "Optional PurpleLlama/governance classifier HTTP endpoint for tool/resource/prompt text")
+	flag.StringVar(&inspectClassifierProvider, "inspect-classifier-provider", "purplellama", "Classifier provider label to send/log with inspection requests")
+	flag.Float64Var(&inspectClassifierThreshold, "inspect-classifier-threshold", 0.5, "Classifier score threshold from 0.0 to 1.0")
+	flag.DurationVar(&inspectClassifierTimeout, "inspect-classifier-timeout", 2*time.Second, "Timeout for classifier HTTP requests")
+	flag.Var(&inspectClassifierHeaders, "inspect-classifier-header", "Classifier request header as Name: value or Name=value (repeatable)")
 	flag.BoolVar(&noNetwork, "no-network", false, "Run server command with outbound network blocked (stdio/discover only)")
 	flag.BoolVar(&noNetworkBest, "no-network-best-effort", false, "Allow running without isolation if no sandbox is available")
 	flag.Var(&allowBins, "allow-bin", "Allow only these executables for tool subprocesses (repeatable or comma-separated)")
@@ -166,7 +176,7 @@ func main() {
 		}
 	}
 
-	if !inspect && (inspectThreshold > 0 || inspectToolThreshold > 0 || inspectResourceThreshold > 0 || inspectPromptThreshold > 0) {
+	if !inspect && (inspectThreshold > 0 || inspectToolThreshold > 0 || inspectResourceThreshold > 0 || inspectPromptThreshold > 0 || strings.TrimSpace(inspectClassifierURL) != "") {
 		inspect = true
 	}
 
@@ -509,6 +519,13 @@ func main() {
 		Block:             inspectBlock,
 		Redact:            inspectRedact,
 		LogExcerpt:        inspectExcerpt,
+		Classifier: firewall.ClassifierConfig{
+			Provider:  inspectClassifierProvider,
+			URL:       strings.TrimSpace(inspectClassifierURL),
+			Headers:   parseHeaders(inspectClassifierHeaders),
+			Threshold: inspectClassifierThreshold,
+			Timeout:   inspectClassifierTimeout,
+		},
 	}
 	opts := firewall.ProxyOptions{
 		Logger:  logger,
@@ -709,6 +726,35 @@ func parseURL(value string) (*url.URL, error) {
 		return nil, fmt.Errorf("missing scheme or host")
 	}
 	return parsed, nil
+}
+
+func parseHeaders(values []string) map[string]string {
+	headers := make(map[string]string)
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		name := ""
+		headerValue := ""
+		found := false
+		equalIndex := strings.Index(value, "=")
+		colonIndex := strings.Index(value, ":")
+		if equalIndex >= 0 && (colonIndex < 0 || equalIndex < colonIndex) {
+			name, headerValue, found = strings.Cut(value, "=")
+		} else {
+			name, headerValue, found = strings.Cut(value, ":")
+		}
+		if !found {
+			continue
+		}
+		name = strings.TrimSpace(name)
+		headerValue = strings.TrimSpace(headerValue)
+		if name != "" && headerValue != "" {
+			headers[name] = headerValue
+		}
+	}
+	return headers
 }
 
 type stringList []string

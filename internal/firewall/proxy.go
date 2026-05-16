@@ -251,7 +251,7 @@ func (p *Proxy) forwardServerToClient(ctx context.Context, server *Codec, client
 
 		pending := p.loadPending(normalizeID(msg.ID))
 		if pending.method != "" {
-			outcome, err := p.processResponse(pending, &msg)
+			outcome, err := p.processResponse(ctx, pending, &msg)
 			if err != nil {
 				return err
 			}
@@ -270,21 +270,23 @@ func (p *Proxy) forwardServerToClient(ctx context.Context, server *Codec, client
 					}
 				}
 				p.logger.Log(LogEvent{
-					Direction:     "server->client",
-					Decision:      "flagged",
-					Reason:        outcome.reason,
-					Method:        pending.method,
-					ID:            reqID,
-					RequestID:     requestID,
-					TraceID:       traceID,
-					Name:          pending.name,
-					URI:           pending.uri,
-					Normalized:    pending.normalized,
-					PolicyRule:    pending.rule,
-					PolicyPattern: pending.pattern,
-					Score:         outcome.inspection.Score,
-					Flags:         outcome.inspection.Flags,
-					Excerpt:       outcome.inspection.Excerpt,
+					Direction:       "server->client",
+					Decision:        "flagged",
+					Reason:          outcome.reason,
+					Method:          pending.method,
+					ID:              reqID,
+					RequestID:       requestID,
+					TraceID:         traceID,
+					Name:            pending.name,
+					URI:             pending.uri,
+					Normalized:      pending.normalized,
+					PolicyRule:      pending.rule,
+					PolicyPattern:   pending.pattern,
+					Score:           outcome.inspection.Score,
+					Flags:           outcome.inspection.Flags,
+					Excerpt:         outcome.inspection.Excerpt,
+					Classifier:      outcome.inspection.ClassifierProvider,
+					ClassifierScore: outcome.inspection.ClassifierScore,
 				})
 			}
 			if outcome.blocked && !p.dryRun {

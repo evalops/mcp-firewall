@@ -238,6 +238,24 @@ Optional hardening:
 
 Inspection is a lint layer by default: it logs `decision=flagged` events and does not block unless you enable it.
 
+Classifier-backed inspection can send the extracted text to a governance service
+or PurpleLlama-compatible classifier endpoint before the normal block/redact
+decision:
+
+```sh
+./mcp-firewall --inspect \
+  --inspect-classifier-url http://127.0.0.1:8088/classify \
+  --inspect-classifier-provider purplellama \
+  --inspect-classifier-header "Authorization: Bearer $TOKEN" \
+  --inspect-classifier-threshold 0.7 \
+  --policy policy.example.yaml -- <server-command>
+```
+
+The classifier receives JSON with `provider`, `kind`, and `text`. Responses may
+return `score`, `label`, `flags`, and `categories`; matching responses are folded
+into the same `suspicionScore`, `suspicionFlags`, `classifier`, and
+`classifierScore` log fields used by the dashboard and enforcement modes.
+
 ## Policy model
 
 - `methods`: JSON-RPC method names (e.g., `tools/call`, `resources/read`).

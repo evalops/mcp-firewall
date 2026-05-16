@@ -1,9 +1,15 @@
 package firewall
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
+	"fmt"
+	"math"
+	"net/http"
 	"regexp"
 	"strings"
+	"time"
 )
 
 type InspectorConfig struct {
@@ -16,12 +22,41 @@ type InspectorConfig struct {
 	Block             bool
 	Redact            bool
 	LogExcerpt        bool
+	Classifier        ClassifierConfig
 }
 
 type Inspection struct {
-	Score   int
-	Flags   []string
-	Excerpt string
+	Score              int
+	Flags              []string
+	Excerpt            string
+	ClassifierProvider string
+	ClassifierScore    float64
+	ClassifierLabel    string
+}
+
+type ClassifierConfig struct {
+	Provider  string
+	URL       string
+	Headers   map[string]string
+	Threshold float64
+	Timeout   time.Duration
+	Client    *http.Client
+}
+
+type classifierRequest struct {
+	Provider string `json:"provider,omitempty"`
+	Kind     string `json:"kind"`
+	Text     string `json:"text"`
+}
+
+type classifierResponse struct {
+	Score       float64  `json:"score"`
+	Confidence  float64  `json:"confidence"`
+	Probability float64  `json:"probability"`
+	Label       string   `json:"label"`
+	Action      string   `json:"action"`
+	Flags       []string `json:"flags"`
+	Categories  []string `json:"categories"`
 }
 
 type pattern struct {
@@ -46,7 +81,7 @@ func (cfg InspectorConfig) enabled() bool {
 	if !cfg.Enabled {
 		return false
 	}
-	return cfg.Threshold > 0 || cfg.ToolThreshold > 0 || cfg.ResourceThreshold > 0 || cfg.PromptThreshold > 0
+	return cfg.Threshold > 0 || cfg.ToolThreshold > 0 || cfg.ResourceThreshold > 0 || cfg.PromptThreshold > 0 || cfg.Classifier.enabled()
 }
 
 func (cfg InspectorConfig) thresholdFor(kind string) int {
@@ -71,7 +106,7 @@ func (cfg InspectorConfig) enabledFor(kind string) bool {
 	return cfg.Enabled && cfg.thresholdFor(kind) > 0
 }
 
-func (cfg InspectorConfig) inspectText(text string) Inspection {
+func (cfg InspectorConfig) inspectText(ctx context.Context, kind string, text string) Inspection {
 	if !cfg.Enabled || text == "" {
 		return Inspection{}
 	}
@@ -96,15 +131,155 @@ func (cfg InspectorConfig) inspectText(text string) Inspection {
 			excerpt = excerptAround(text, loc[0], loc[1])
 		}
 	}
-	return Inspection{Score: score, Flags: flags, Excerpt: excerpt}
+	inspection := Inspection{Score: score, Flags: flags, Excerpt: excerpt}
+	if classifierInspection, err := cfg.Classifier.classify(ctx, kind, text); err == nil {
+		inspection = mergeInspections(inspection, classifierInspection)
+	}
+	return inspection
 }
 
-func (cfg InspectorConfig) inspectTexts(texts []string) Inspection {
+func (cfg InspectorConfig) inspectTexts(ctx context.Context, kind string, texts []string) Inspection {
 	if !cfg.Enabled {
 		return Inspection{}
 	}
 	combined := strings.Join(texts, "\n")
-	return cfg.inspectText(combined)
+	return cfg.inspectText(ctx, kind, combined)
+}
+
+func (cfg ClassifierConfig) enabled() bool {
+	return strings.TrimSpace(cfg.URL) != ""
+}
+
+func (cfg ClassifierConfig) classify(ctx context.Context, kind string, text string) (Inspection, error) {
+	if !cfg.enabled() || strings.TrimSpace(text) == "" {
+		return Inspection{}, nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	timeout := cfg.Timeout
+	if timeout <= 0 {
+		timeout = 2 * time.Second
+	}
+	classifierCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	payload, err := json.Marshal(classifierRequest{
+		Provider: strings.TrimSpace(cfg.Provider),
+		Kind:     strings.TrimSpace(kind),
+		Text:     text,
+	})
+	if err != nil {
+		return Inspection{}, err
+	}
+	request, err := http.NewRequestWithContext(classifierCtx, http.MethodPost, cfg.URL, bytes.NewReader(payload))
+	if err != nil {
+		return Inspection{}, err
+	}
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Accept", "application/json")
+	for key, value := range cfg.Headers {
+		key = strings.TrimSpace(key)
+		value = strings.TrimSpace(value)
+		if key != "" && value != "" {
+			request.Header.Set(key, value)
+		}
+	}
+
+	client := cfg.Client
+	if client == nil {
+		client = http.DefaultClient
+	}
+	response, err := client.Do(request)
+	if err != nil {
+		return Inspection{}, err
+	}
+	defer response.Body.Close()
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return Inspection{}, fmt.Errorf("classifier returned HTTP %d", response.StatusCode)
+	}
+	var decoded classifierResponse
+	if err := json.NewDecoder(response.Body).Decode(&decoded); err != nil {
+		return Inspection{}, err
+	}
+	return cfg.inspectionFromResponse(decoded), nil
+}
+
+func (cfg ClassifierConfig) inspectionFromResponse(response classifierResponse) Inspection {
+	score := firstPositiveFloat(response.Score, response.Confidence, response.Probability)
+	threshold := cfg.Threshold
+	if threshold <= 0 {
+		threshold = 0.5
+	}
+	label := strings.TrimSpace(response.Label)
+	action := strings.ToLower(strings.TrimSpace(response.Action))
+	blockingAction := action == "block" || action == "deny"
+	flags := prefixedClassifierFlags(cfg.Provider, label, response.Flags, response.Categories)
+	if score < threshold && label == "" && !blockingAction {
+		return Inspection{ClassifierProvider: strings.TrimSpace(cfg.Provider), ClassifierScore: score}
+	}
+	contribution := int(math.Ceil(score * 10))
+	if blockingAction && contribution < 10 {
+		contribution = 10
+	}
+	if contribution <= 0 {
+		contribution = 1
+	}
+	return Inspection{
+		Score:              contribution,
+		Flags:              flags,
+		ClassifierProvider: strings.TrimSpace(cfg.Provider),
+		ClassifierScore:    score,
+		ClassifierLabel:    label,
+	}
+}
+
+func prefixedClassifierFlags(provider string, label string, flags []string, categories []string) []string {
+	prefix := strings.TrimSpace(provider)
+	if prefix == "" {
+		prefix = "classifier"
+	}
+	result := make([]string, 0, 1+len(flags)+len(categories))
+	appendFlag := func(value string) {
+		value = strings.TrimSpace(value)
+		if value != "" {
+			result = append(result, prefix+":"+value)
+		}
+	}
+	appendFlag(label)
+	for _, flag := range flags {
+		appendFlag(flag)
+	}
+	for _, category := range categories {
+		appendFlag(category)
+	}
+	if len(result) == 0 {
+		result = append(result, prefix+":flagged")
+	}
+	return result
+}
+
+func mergeInspections(left Inspection, right Inspection) Inspection {
+	left.Score += right.Score
+	left.Flags = append(left.Flags, right.Flags...)
+	if left.Excerpt == "" {
+		left.Excerpt = right.Excerpt
+	}
+	if right.ClassifierProvider != "" {
+		left.ClassifierProvider = right.ClassifierProvider
+		left.ClassifierScore = right.ClassifierScore
+		left.ClassifierLabel = right.ClassifierLabel
+	}
+	return left
+}
+
+func firstPositiveFloat(values ...float64) float64 {
+	for _, value := range values {
+		if value > 0 {
+			return value
+		}
+	}
+	return 0
 }
 
 func excerptAround(text string, start, end int) string {
