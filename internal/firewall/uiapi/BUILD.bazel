@@ -1,0 +1,8 @@
+load("@rules_go//go:def.bzl", "go_library")
+
+go_library(
+    name = "uiapi",
+    srcs = ["handler.go"],
+    importpath = "mcp-firewall/internal/firewall/uiapi",
+    visibility = ["//:__subpackages__"],
+)

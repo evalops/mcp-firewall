@@ -1,0 +1,36 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "firewall",
+    srcs = [
+        "codec.go",
+        "discover.go",
+        "filter.go",
+        "http_proxy.go",
+        "http_server.go",
+        "inspect.go",
+        "logging.go",
+        "policy.go",
+        "policy_history.go",
+        "policy_templates.go",
+        "proxy.go",
+        "sandbox.go",
+        "sse.go",
+        "toggle.go",
+        "types.go",
+        "ui_backend.go",
+    ],
+    importpath = "mcp-firewall/internal/firewall",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//internal/firewall/ui",
+        "//internal/firewall/uiapi",
+        "@in_gopkg_yaml_v3//:yaml_v3",
+    ],
+)
+
+go_test(
+    name = "firewall_test",
+    srcs = ["policy_test.go"],
+    embed = [":firewall"],
+)

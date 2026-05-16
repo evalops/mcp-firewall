@@ -1,0 +1,13 @@
+load("@rules_go//go:def.bzl", "go_library")
+
+go_library(
+    name = "ui",
+    srcs = ["embed.go"],
+    embedsrcs = [
+        "assets/app.js",
+        "assets/index.html",
+        "assets/styles.css",
+    ],
+    importpath = "mcp-firewall/internal/firewall/ui",
+    visibility = ["//:__subpackages__"],
+)
